@@ -1,0 +1,29 @@
+# Credentials — never commit
+.env
+
+# Pipeline outputs
+outputs/
+
+# Slack session logs and temp prompt files
+slack_sessions.log
+_prompt_*.txt
+
+# daq source clone (installed as a git dependency, not committed)
+_daq_src/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Claude Code project memory (machine-local)
+.claude/
