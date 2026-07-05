@@ -153,73 +153,114 @@ If the user says **no**, skip entirely — do not mention DR conditions anywhere
 
 ## Step 3 — multi-agent report generation
 
-After `run.py` finishes and DR conditions are decided (Step 2b), generate the report using a 4-phase pipeline. All phases run as direct API scripts — do not write the report yourself.
+After `run.py` finishes and DR conditions are decided (Step 2b), generate the report by spawning **Agent-tool subagents**. Do **not** write the report yourself.
 
-The pipeline runs in strict sequence: Phase A runs in parallel threads (inside run_phase_a.py), then Phase B waits for all of them, then Phase C waits for Phase B, then Phase D waits for Phase C.
+Run the four phases in strict sequence: **Phase A** (four analysts, concurrent) → **Phase B** (waits for all of A) → **Phase C** (waits for B) → **Phase D** (waits for C; may trigger one Phase C revision).
 
----
+**Conventions for every subagent below:**
+- Let `<out_dir>` = `$PROJECT_ROOT/outputs/<experiment_id>`. Substitute it literally into each prompt.
+- Each agent reads its inputs from `<out_dir>` and writes its output file(s) back into `<out_dir>`.
+- To analyse figures, the agent **reads the image files directly with the Read tool** (it renders images natively) — never base64-encode anything.
+- Spawn agents with the Agent tool (general-purpose subagent). **Spawn the Phase A agents together in a single message so they run concurrently.** Wait for a phase to fully complete before starting the next.
 
-### Phase A — Parallel extraction
-
-Run the extraction script directly — do **not** spawn Agent tool calls for Phase A:
-
-```bash
-cd $PROJECT_ROOT
-python run_phase_a.py outputs/<experiment_id>
-```
-
-This script calls the Anthropic API directly using `ANTHROPIC_API_KEY` (Haiku model) and runs all four analysts in parallel. Wait for it to exit before proceeding to Phase B. It writes `extracted_github.md`, `extracted_labarchives.md`, `extracted_deps.md`, and `extracted_dr.md` (only if `dr_conditions.md` exists).
-
-The script handles all four analysts internally — see `run_phase_a.py` for the per-analyst prompts and output schemas.
+> **This branch is agents-only.** A direct-API implementation of these same four phases (using `ANTHROPIC_API_KEY` instead of Claude Code subagents) exists separately on the `conference-api-version` branch as `run_phase_a/b/c/d.py`, for environments without a Claude Code plan. It is intentionally not part of this branch — always orchestrate the phases via the Agent tool as described below.
 
 ---
 
-### Phase B — Synthesis
+### Phase A — Parallel extraction (4 concurrent subagents)
 
-Run the synthesis script directly — do **not** spawn an Agent tool call for Phase B:
+Spawn all applicable analysts in **one message**. Spawn the **DR Analyst only if `<out_dir>/dr_conditions.md` exists**.
 
-```bash
-cd $PROJECT_ROOT
-python run_phase_b.py outputs/<experiment_id>
-```
+**GitHub Analyst** → writes `<out_dir>/extracted_github.md`
 
-This calls the Anthropic API directly using `ANTHROPIC_API_KEY` (Sonnet model). Wait for it to exit before proceeding to Phase C. It writes `connections.md`.
+> You are the GitHub Analyst. Read `<out_dir>/notebooks.md`, `<out_dir>/data_summaries.md`, and every image file listed in `<out_dir>/github_images.md` (open each image with the Read tool). Produce a single Markdown document with exactly these sections (use ## headings) and write it to `<out_dir>/extracted_github.md`:
+>
+> **## Key Parameters** — a markdown table: Parameter | Value | Units | Notes. Every instrument setting, frequency range, amplitude, power level, timing parameter, and software constant found anywhere. If a value appears multiple times with different numbers, list both and note the discrepancy.
+> **## Sweep Procedure** — ordered list of what the code actually does step by step. Interpret imported classes/functions from their names and usage — do not guess at internals not visible in the notebooks.
+> **## Numeric Results** — bulleted list of every quantitative outcome with units: fitted resonance frequencies, Q factors, power levels, measured ranges, calibration values.
+> **## Figures** — one sub-section (### filename) per image. Describe what is visually present: axis labels, curve shapes, legend entries, numeric values readable in the plot. One-line physical interpretation. If an image cannot be read write [Image not readable].
+> **## Cross-reference flags** — values needing validation against other sources: attenuation assumptions baked into amplitude settings, frequency references that should match LabArchives notes, timestamps that could correlate with DR data.
+
+**LabArchives Analyst** → writes `<out_dir>/extracted_labarchives.md`
+
+> You are the LabArchives Analyst. Read `<out_dir>/labarchives.md` and every image file listed in `<out_dir>/labarchives_images.md` (open each with the Read tool). Also fetch the wiring diagram page live: its title is the `Wiring diagram page` value in `$PROJECT_ROOT/lab_config.md`; fetch it by running `python -c "from lab_agent.sources.labarchives import LabArchivesAdapter; arts=LabArchivesAdapter('<WIRING_DIAGRAM_PAGE>').fetch(); print('\n\n'.join(a.content for a in arts if a.content))"` from `$PROJECT_ROOT`. Produce a single Markdown document with exactly these sections (## headings) and write it to `<out_dir>/extracted_labarchives.md`:
+>
+> **## Timeline** — chronological list of actions/observations with timestamps as they appear in the notebook.
+> **## Lab Observations** — what was actually observed or noted, past tense, sourced from what the notebook says happened.
+> **## Stated Goals** — clearly labelled NOT necessarily executed. Every future-tense statement, "plan to", "optionally", "next we will". These are intentions, not actions.
+> **## All Hyperlinks** — every [text](url) link found anywhere; preserve full URLs; note what each points to.
+> **## Additional GitHub URLs** — any GitHub links beyond the primary one; note whether each appears relevant based on context.
+> **## Attenuation Chain** — from the wiring diagram: full RF component list in signal-path order with the dB value for each stage and the total attenuation.
+> **## Discrepancies** — any attenuation/power value in the lab notes that conflicts with the wiring diagram; quote both values exactly and note which source is the diagram.
+> **## Figures** — one sub-section (### filename) per image. Describe visual content + physical interpretation. Write [Image not readable] if the file cannot be opened.
+> **## Cross-reference flags** — values in the notes needing validation against GitHub notebooks: power levels assumed in notes, frequency references, timing windows.
+
+**Dependencies Analyst** → writes `<out_dir>/extracted_deps.md`
+
+> You are the Dependencies Analyst. Read `<out_dir>/dependencies.md`. Produce a single Markdown document and write it to `<out_dir>/extracted_deps.md`. One ## section per package: what the package does, key classes with their constructor parameters and defaults, key hardware constants defined in the source, data flow through the package's main entry points. Note any packages marked "Not found in org" and describe what their import usage in the notebooks suggests about their role. End with **## Cross-reference flags** — any constant whose default value in the source differs from what appears to be set explicitly in the notebooks.
+
+**DR Analyst** *(only if `<out_dir>/dr_conditions.md` exists)* → writes `<out_dir>/extracted_dr.md`
+
+> You are the DR Analyst. First read the **"DR Analyst — physics reference"** section of `$PROJECT_ROOT/CLAUDE.md` for the physics you need. Then read `<out_dir>/dr_conditions.md`. Produce a single Markdown document with exactly these sections (## headings) and write it to `<out_dir>/extracted_dr.md`:
+>
+> **## System State** — at base, cooling, or warming during the window? One clear sentence.
+> **## Temperature Analysis** — MXC min/median/max with units, ratio of max to min, which channels report valid readings vs. known-unreliable at base (RuO2 sensors — Still, 50 mK plate — lose calibration below ~1 K; their absence is normal).
+> **## Pressure Analysis** — P1 fore-line value, whether pumps were running, any fluctuations and what they indicate.
+> **## n_th calculation** — thermal photon occupancy at 5 GHz at the MXC median temperature using n_th = 1/(exp(hf/kT) − 1). Show the arithmetic.
+> **## Quasiparticle assessment** — Mattis-Bardeen: estimate thermal QP contribution relative to base and what it means for the experiment type. For Al: Δ ≈ 172 μeV ≈ 2 K equivalent; n_qp ∝ exp(−Δ/kT).
+> **## Anomaly flags** — each applicable anomaly with its physical explanation (MXC min > 50 mK; max/min > 3×; median >> min; Still > 1 K; P1 at ~1000 mbar).
+> **## Cross-reference flags** — time windows where the DR was anomalous that should be checked against experiment timestamps in the GitHub notebooks.
 
 ---
 
-### Phase C — Report writing
+### Phase B — Synthesis (1 subagent)
 
-Run the report writer script directly — do **not** spawn an Agent tool call for Phase C:
+After all Phase A agents finish, spawn one Synthesis agent → writes `<out_dir>/connections.md`.
 
-```bash
-cd $PROJECT_ROOT
-python run_phase_c.py outputs/<experiment_id>
-```
+> You are the Synthesis Agent. Read only the extracted files in `<out_dir>` (`extracted_github.md`, `extracted_labarchives.md`, `extracted_deps.md`, and `extracted_dr.md` if present) — not the raw data. Find every cross-source connection, conflict, and gap. Write `<out_dir>/connections.md` with exactly these sections (## headings):
+>
+> **## Power chain closure** — combine the attenuation chain (extracted_labarchives.md) with amplitude/power settings (extracted_github.md); calculate power at the device (dBm); does the math close? State result with units and any discrepancy.
+> **## Timeline correlations** — map experiment steps (extracted_github.md) against DR anomaly windows (extracted_dr.md): was any measurement taken during an elevated-temperature or pump-off period? If no DR data, state that explicitly.
+> **## Lab observations vs. numeric results** — does extracted_labarchives.md corroborate or contradict the fitted/measured values in extracted_github.md? Agreements and conflicts separately.
+> **## Goal vs. executed map** — a table, one row per stated goal from extracted_labarchives.md: Stated Goal | Evidence of Execution in Notebooks (yes/no/partial) | Source line.
+> **## Dependency constants vs. notebook usage** — using extracted_deps.md cross-reference flags, list every case where a notebook sets a value differing from the package default.
+> **## Multi-source conflicts** — any numeric value appearing in more than one extracted file with different numbers; exact values from each source; which to trust and why.
+> **## Figures needing cross-source context** — any figure whose interpretation depends on information from a different extracted file; explain the dependency.
+> **## Additional GitHub URLs recommendation** — based on all extracted files, recommend whether any additional GitHub URLs flagged by the LabArchives Analyst are worth fetching before writing; if yes, which and why.
 
-This calls the Anthropic API directly using `ANTHROPIC_API_KEY` (Sonnet model, streaming). Wait for it to exit before proceeding to Phase D. It writes `[UNSIGNED] <experiment_id>.md`.
+---
+
+### Phase C — Report writing (1 subagent)
+
+After Phase B finishes, spawn one Report Writer agent → writes `<out_dir>/[UNSIGNED] <experiment_id>.md`.
+
+> You are the Report Writer. Read the extracted files and `connections.md` in `<out_dir>`, plus `<out_dir>/metadata.json` (for `experiment_id` and `la_pages`). Do **not** read raw data files and never read existing `[UNSIGNED]` files. Follow the **"Report Writer — instructions"** section of `$PROJECT_ROOT/CLAUDE.md` exactly — header block, section order, figure-embedding rules, and accuracy/claims rules. Embed figures with relative paths (e.g. `![caption](labarchives_images/filename.png)`) reading figure descriptions only from the extracted files. Write the finished report to `<out_dir>/[UNSIGNED] <experiment_id>.md`. Output must start directly with the `# [UNSIGNED] <experiment_id>` title line — no preamble, no filename, no `.md` extension in the title.
 
 ---
 
 ### Phase D — Critique and revision
 
-Run the critique script directly — do **not** spawn an Agent tool call for Phase D:
+After Phase C finishes, spawn one Critic agent → writes `<out_dir>/critique.md`.
 
-```bash
-cd $PROJECT_ROOT
-python run_phase_d.py outputs/<experiment_id>
-```
+> You are the Critic. Read the `[UNSIGNED]` report, all `extracted_*.md`, and `connections.md` in `<out_dir>`. Run this fixed checklist against the report; for each item write PASS or FAIL, and for every FAIL quote the exact failing sentence and explain why. Write the result to `<out_dir>/critique.md`.
+>
+> 1. Every numeric value in the report's Key Parameters table appears with the same number in extracted_github.md or extracted_deps.md.
+> 2. No figure description in the report contains visual content not present in the corresponding Figures sub-section of an extracted file.
+> 3. "Confirms" is not used unless connections.md documents a direct quantitative comparison that supports it.
+> 4. No step is described as executed that appears in the Goal vs. Executed map in connections.md as "no".
+> 5. No physics mechanism is named that does not appear in any extracted file.
+> 6. The Key Parameters table appears exactly once in the report.
+> 7. The Key Findings section does not restate sentences that already appear in Results.
+>
+> End with a `## Summary` line: `PASS` (all items passed) or `FAIL` (list the failing item numbers).
 
-This calls the Anthropic API directly using `ANTHROPIC_API_KEY` (Sonnet model) and writes `critique.md`. The script exits with code 0 if all items PASS, or 1 if any FAIL.
+Read `critique.md`:
+- **All items PASS** → proceed directly to Step 4 (upload).
+- **Any item FAILs** → run one revision pass: spawn a Report Writer agent in revision mode →
 
-- If exit code is **0** (all PASS) → proceed directly to Step 4 (upload).
-- If exit code is **1** (any FAIL) → run the revision pass:
+> You are the Report Writer performing a targeted revision. Read the current `[UNSIGNED]` report in `<out_dir>`, `<out_dir>/critique.md`, and the `extracted_*.md` + `connections.md` files. Fix ONLY the FAIL items from the critique — make the minimum changes necessary; do not restructure sections that PASSED or rewrite passing sentences. Overwrite the same `[UNSIGNED] <experiment_id>.md`. Output ONLY the complete revised report, starting directly with the `# [UNSIGNED]` header — no preamble, no "Fixes Applied" section, no commentary.
 
-```bash
-cd $PROJECT_ROOT
-python run_phase_c.py outputs/<experiment_id> --revision
-```
-
-This applies targeted fixes only to the failing items and overwrites the report. Then proceed to Step 4.
+Then proceed to Step 4.
 
 ---
 
