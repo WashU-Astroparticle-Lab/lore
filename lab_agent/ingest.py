@@ -55,9 +55,19 @@ def csv_table_from_rows(rows: list[list[str]]) -> str:
     """Render a list of CSV rows as a markdown table string."""
     if not rows:
         return ""
-    header = "| " + " | ".join(rows[0]) + " |"
-    sep = "| " + " | ".join("---" for _ in rows[0]) + " |"
-    body = "\n".join("| " + " | ".join(row) + " |" for row in rows[1:])
+    n_cols = len(rows[0])
+
+    def _cell(v: str) -> str:
+        return v.replace("|", "\\|")
+
+    header = "| " + " | ".join(_cell(c) for c in rows[0]) + " |"
+    sep    = "| " + " | ".join("---" for _ in rows[0]) + " |"
+    body_lines = []
+    for row in rows[1:]:
+        # Pad short rows to header width so the table stays rectangular.
+        padded = (row + [""] * n_cols)[:n_cols]
+        body_lines.append("| " + " | ".join(_cell(c) for c in padded) + " |")
+    body = "\n".join(body_lines)
     return "\n".join(filter(None, [header, sep, body]))
 
 

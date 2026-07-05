@@ -1,15 +1,34 @@
 # Credentials — never commit
 .env
 
+# Lab-specific config (machine-local — copy from lab_config.template.md and fill in)
+lab_config.md
+
+# Windows system files
+desktop.ini
+Thumbs.db
+
 # Pipeline outputs
 outputs/
 
 # Slack session logs and temp prompt files
 slack_sessions.log
+session_logs/
 _prompt_*.txt
+
+# Persistent Playwright browser profile (contains Duo trusted-device cookies)
+_browser_profile/
 
 # daq source clone (installed as a git dependency, not committed)
 _daq_src/
+
+# Local instrument data — Leiden Cryogenics DR logs (large, lab-specific, not code)
+# Point DR_DATA_PATH in .env at wherever these live on the running machine.
+Data/
+
+# Local documents and assets not required to run
+figures/
+*.pdf
 
 # Python
 __pycache__/

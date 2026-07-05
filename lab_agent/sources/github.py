@@ -4,6 +4,7 @@ import json
 import os
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from ..discover import build_artifact_group, synthesize_config, infer_title_from_notebook, infer_objective_from_notebook
@@ -135,11 +136,11 @@ class GitHubAdapter:
             else:
                 paths.append(item_path)
         if data.get("truncated"):
-            import warnings
-            warnings.warn(
-                f"GitHub tree response was truncated for {self._url}; "
-                "some files may be missing from discovery.",
-                stacklevel=2,
+            print(
+                f"[GitHub] WARNING: tree response was truncated for {self._url}. "
+                "Some files may be missing from the report. "
+                "Consider pointing to a subfolder instead of the repo root.",
+                flush=True,
             )
         return paths
 
@@ -183,8 +184,13 @@ class GitHubAdapter:
         content: str | None = None
 
         if artifact.type == "notebook" and suffix == "ipynb":
-            content = notebook_text_from_content(text)
-            markdown_cells = notebook_markdown_from_content(text)
+            try:
+                content = notebook_text_from_content(text)
+                markdown_cells = notebook_markdown_from_content(text)
+            except Exception as exc:
+                print(f"[GitHub] Warning: could not parse notebook {artifact.path!r}: {exc}", flush=True)
+                content = text  # fall back to raw JSON so Claude still has the content
+                markdown_cells = []
         elif suffix in ("csv", "tsv"):
             csv_rows = csv_rows_from_text(text)
             content = csv_table_from_rows(csv_rows)

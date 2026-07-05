@@ -5,6 +5,9 @@ nbformat
 markdown
 Pillow
 
+# Report generation (Phases A–D call the Anthropic API directly)
+anthropic
+
 # Slack bot
 slack-bolt
 slack-sdk

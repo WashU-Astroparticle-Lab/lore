@@ -34,9 +34,14 @@ _CT_TO_EXT: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 def _is_base64(s: str) -> bool:
-    """Return True if s looks like a base64-encoded string (not a plain URL or number)."""
+    """Return True if s looks like a base64-encoded LabArchives tree_id.
+
+    LabArchives tree_ids are base64 strings ≥ 20 characters.  Using a high
+    minimum length prevents page titles like "Cooldown" (which happen to be
+    all-alphanumeric) from being misidentified as tree_ids.
+    """
     import re
-    return bool(re.fullmatch(r"[A-Za-z0-9+/=]+", s)) and len(s) >= 8 and not s.isdigit()
+    return bool(re.fullmatch(r"[A-Za-z0-9+/=]+", s)) and len(s) >= 20 and not s.isdigit()
 
 
 def _parse_entry_ref(entry_ref: str) -> tuple[str, str | None, str | None, str | None, str | None]:
@@ -184,13 +189,34 @@ class _HTMLStripper(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
         self._parts: list[str] = []
+        self._href: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag == "a":
+            href = dict(attrs).get("href") or ""
+            if href.startswith("http"):
+                self._href = href
+                self._parts.append("[")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._href:
+            self._parts.append(f"]({self._href})")
+            self._href = None
 
     def handle_data(self, data: str) -> None:
         self._parts.append(data)
 
     def get_text(self) -> str:
-        import re
-        return re.sub(r"\s+", " ", "".join(self._parts)).strip()
+        parts = self._parts
+        # If an <a href="..."> was opened but </a> was never seen (malformed HTML),
+        # _href is still set and there's a dangling '[' with no closing ']'.
+        # Remove it so the output isn't broken Markdown.
+        if self._href is not None:
+            for i in range(len(parts) - 1, -1, -1):
+                if parts[i] == "[":
+                    parts.pop(i)
+                    break
+        return re.sub(r"\s+", " ", "".join(parts)).strip()
 
 
 def _html_to_text(html: str) -> str:
@@ -292,6 +318,26 @@ class LabArchivesAdapter:
         )
         return ET.fromstring(xml_text).findall(".//level-node")
 
+    def _find_display_title_for_tree_id(self, nbid: str, target_tree_id: str, parent: str = "0", depth: int = 0) -> str | None:
+        """Traverse the notebook tree and return the display-text for the node with target_tree_id."""
+        if depth > 6:
+            return None
+        try:
+            nodes = self._get_tree_level(nbid, parent)
+        except RuntimeError:
+            return None
+        for node in nodes:
+            b64_tid = node.findtext("tree-id") or ""
+            display = (node.findtext("display-text") or "").strip()
+            is_page = node.findtext("is-page") == "true"
+            if b64_tid == target_tree_id:
+                return display or None
+            if not is_page:
+                result = self._find_display_title_for_tree_id(nbid, target_tree_id, b64_tid, depth + 1)
+                if result:
+                    return result
+        return None
+
     def _find_page_tree_id(self, nbid: str, numeric_target: str, parent: str = "0", depth: int = 0) -> str | None:
         """Recursively search the notebook tree for a page containing numeric_target."""
         if depth > 5:
@@ -315,23 +361,48 @@ class LabArchivesAdapter:
                     return result
         return None
 
-    def _find_page_by_title(self, nbid: str, title: str, parent: str = "0", depth: int = 0) -> str | None:
-        """Recursively search the notebook tree for a page whose display-text matches title (case-insensitive)."""
-        if depth > 5:
+    def _find_page_by_title(
+        self,
+        nbid: str,
+        title: str,
+        parent: str = "0",
+        depth: int = 0,
+        _collected: "list[tuple[str, str, str]] | None" = None,
+    ) -> str | None:
+        """Recursively search for a page by title.
+
+        Matching order:
+          1. Exact case-insensitive match
+          2. Collapsed-whitespace case-insensitive match (handles extra spaces, etc.)
+
+        _collected accumulates (display_text, nbid, b64_tid) for every page encountered
+        so the caller can do fallback matching and build useful error messages.
+        """
+        if depth > 6:
             return None
         try:
             nodes = self._get_tree_level(nbid, parent)
         except RuntimeError:
             return None
-        title_lower = title.lower()
+
+        title_exact = title.strip().lower()
+        title_norm = " ".join(title_exact.split())
+
         for node in nodes:
             b64_tid = node.findtext("tree-id") or ""
             display = (node.findtext("display-text") or "").strip()
             is_page = node.findtext("is-page") == "true"
-            if is_page and display.lower() == title_lower:
-                return b64_tid
+
+            if is_page:
+                if _collected is not None:
+                    _collected.append((display, nbid, b64_tid))
+                d_exact = display.lower()
+                d_norm = " ".join(d_exact.split())
+                if d_exact == title_exact or d_norm == title_norm:
+                    return b64_tid
+
             if not is_page:
-                result = self._find_page_by_title(nbid, title, b64_tid, depth + 1)
+                result = self._find_page_by_title(nbid, title, b64_tid, depth + 1, _collected)
                 if result:
                     return result
         return None
@@ -480,12 +551,22 @@ class LabArchivesAdapter:
     def _download_image(self, url: str) -> tuple[bytes, str]:
         """Download an image URL. Returns (bytes, content_type).
 
+        Handles data URIs (base64-encoded inline images) directly — no HTTP request.
         Handles relative URLs by prepending the base URL.
         Attempt order:
           1. Plain unauthenticated GET
           2. HMAC-signed GET (for API-hosted images)
           3. Session-cookie GET (for inline images that require web-session auth)
         """
+        # data URIs are self-contained — decode the base64 directly, no HTTP needed.
+        if url.startswith("data:"):
+            try:
+                header, _, b64data = url.partition(",")
+                content_type = header.split(";")[0].replace("data:", "").strip() or "image/png"
+                return base64.b64decode(b64data), content_type
+            except Exception as exc:
+                raise RuntimeError(f"Failed to decode data URI: {exc}") from exc
+
         if url.startswith("/"):
             url = self._base_url + url
         elif not url.startswith("http"):
@@ -581,20 +662,51 @@ class LabArchivesAdapter:
                     f"not found in any of the {len(notebooks)} searched notebook(s). "
                     "It may belong to a shared/external notebook."
                 )
+            # Resolve human-readable title for filename generation (avoids cryptic b64 prefix).
+            display_title = self._find_display_title_for_tree_id(nbid, page_tree_id)
+            if display_title:
+                self._page_title = display_title
+                print(f"[LabArchives] Resolved b64 tree_id to display title: {display_title!r}")
         elif self._page_title:
             # Page title: search notebooks by display-text.
             print(f"[LabArchives] Searching for page titled {self._page_title!r}…")
+            all_pages: list[tuple[str, str, str]] = []  # (display, nbid, b64_tid)
             for nb in notebooks:
-                found = self._find_page_by_title(nb["nbid"], self._page_title)
+                found = self._find_page_by_title(nb["nbid"], self._page_title, _collected=all_pages)
                 if found:
                     page_tree_id = found
                     nbid = nb["nbid"]
                     break
+
+            if page_tree_id is None or nbid is None:
+                # Fallback: if the title starts with an 8-digit date and exactly one page
+                # in the notebook shares that date prefix, use it automatically. This
+                # recovers from minor punctuation mangling (e.g. a comma in the wrong place).
+                date_prefix = self._page_title[:8] if len(self._page_title) >= 8 and self._page_title[:8].isdigit() else ""
+                if date_prefix:
+                    prefix_hits = [(d, n, t) for d, n, t in all_pages if d.startswith(date_prefix)]
+                    if len(prefix_hits) == 1:
+                        display_match, nbid_match, tid_match = prefix_hits[0]
+                        print(f"[LabArchives] Fuzzy date-prefix match: using {display_match!r} "
+                              f"(searched for {self._page_title!r})")
+                        page_tree_id = tid_match
+                        nbid = nbid_match
+                        self._page_title = display_match  # use real title for filenames
+
             if page_tree_id is None or nbid is None:
                 nb_desc = f"notebook {self._known_nbid[:20]}…" if self._known_nbid else f"{len(notebooks)} notebook(s)"
+                date_prefix = self._page_title[:8] if len(self._page_title) >= 8 and self._page_title[:8].isdigit() else ""
+                similar_displays = [d for d, _, _ in all_pages if date_prefix and d.startswith(date_prefix)]
+                if not similar_displays:
+                    similar_displays = [d for d, _, _ in all_pages[:20]]
+                hint = (
+                    "\n\nPages available in the notebook:\n" + "\n".join(f"  · {p!r}" for p in similar_displays)
+                    if similar_displays else ""
+                )
                 raise RuntimeError(
                     f"No page titled {self._page_title!r} found in {nb_desc}. "
                     "Check the exact page title in LabArchives (case-insensitive match)."
+                    + hint
                 )
         else:
             # Numeric ID: search notebooks by tree traversal.
@@ -665,6 +777,7 @@ class LabArchivesAdapter:
                 print(f"[LabArchives] Warning: skipping attachment {filename} — {exc}")
 
         # Embedded <img> images inside rich-text entry HTML
+        cookie_errors: list[str] = []
         for i, img_url in enumerate(self._extract_embedded_img_urls(xml_text), start=1):
             print(f"[LabArchives] Downloading embedded image {i}: {img_url[:70]}…")
             try:
@@ -680,6 +793,18 @@ class LabArchivesAdapter:
                     source="labarchives",
                 ))
             except RuntimeError as exc:
-                print(f"[LabArchives] Warning: skipping embedded image {i} — {exc}")
+                msg = str(exc)
+                if "expired" in msg.lower() or "LA_SESSION_COOKIE" in msg or "get_la_cookies" in msg:
+                    cookie_errors.append(msg)
+                else:
+                    print(f"[LabArchives] Warning: skipping embedded image {i} — {exc}")
+
+        if cookie_errors:
+            raise RuntimeError(
+                f"COOKIE_REFRESH_NEEDED: LabArchives session cookies have expired "
+                f"({len(cookie_errors)} embedded image(s) failed).\n"
+                "Run:  python get_la_cookies.py\n"
+                "Then retry the pipeline."
+            )
 
         return text_artifacts + image_artifacts

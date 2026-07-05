@@ -129,19 +129,23 @@ def _gh_file(url: str, token: str) -> str | None:
 
 
 def _list_org_repos(owner: str, token: str) -> dict[str, str]:
-    """Return {repo_name_lower: default_branch} for the org."""
+    """Return {repo_name_lower: default_branch} for an org or user account."""
     repos = {}
-    page = 1
-    while True:
-        url = f"https://api.github.com/orgs/{owner}/repos?per_page=100&page={page}"
-        data = _gh_get(url, token)
-        if not data:
-            break
-        for r in data:
-            repos[r["name"].lower()] = r.get("default_branch", "main")
-        if len(data) < 100:
-            break
-        page += 1
+    # Try org endpoint first; fall back to user endpoint for personal accounts.
+    for endpoint_prefix in (f"orgs/{owner}", f"users/{owner}"):
+        page = 1
+        while True:
+            url = f"https://api.github.com/{endpoint_prefix}/repos?per_page=100&page={page}"
+            data = _gh_get(url, token)
+            if not data:
+                break
+            for r in data:
+                repos[r["name"].lower()] = r.get("default_branch", "main")
+            if len(data) < 100:
+                break
+            page += 1
+        if repos:
+            break  # found repos via this endpoint; no need to try the other
     return repos
 
 
