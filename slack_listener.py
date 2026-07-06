@@ -481,6 +481,17 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
     prompt_file = PROJECT_ROOT / f"_prompt_{user}_{session_id}.txt"
     prompt_file.write_text(prompt, encoding="utf-8")
 
+    # The spawned Claude Code session must authenticate with the Claude Code plan
+    # (claude.ai / enterprise login), NOT the Anthropic API. If ANTHROPIC_API_KEY
+    # (or another API auth token) is present in the environment, Claude Code uses
+    # it in preference to the plan login — which fails here because the API account
+    # is not the billing path we want. Scrub those vars from the child environment
+    # so the session falls back to the plan login. The pipeline's own scripts read
+    # their keys directly from .env via load_dotenv, so this does not affect them.
+    child_env = os.environ.copy()
+    for _var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        child_env.pop(_var, None)
+
     with open(session_log, "w") as log:
         log.write(f"=== Session {session_id}: user={user} channel={channel} ===\n")
         proc = subprocess.Popen(
@@ -489,6 +500,7 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
             cwd=str(PROJECT_ROOT),
             stdout=log,
             stderr=log,
+            env=child_env,
         )
 
     # Fill in the slot now that we have the real proc

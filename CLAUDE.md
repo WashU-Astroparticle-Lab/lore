@@ -35,6 +35,7 @@ You can call the Slack API directly using the bot token. Available scopes includ
 **How to call the Slack API:**
 ```python
 import os, requests
+from dotenv import load_dotenv; load_dotenv()  # ensure .env is loaded regardless of how the session started
 token = os.environ["SLACK_BOT_TOKEN"]
 # Search messages
 r = requests.get("https://slack.com/api/search.messages",
@@ -183,7 +184,7 @@ Spawn all applicable analysts in **one message**. Spawn the **DR Analyst only if
 
 **LabArchives Analyst** → writes `<out_dir>/extracted_labarchives.md`
 
-> You are the LabArchives Analyst. Read `<out_dir>/labarchives.md` and every image file listed in `<out_dir>/labarchives_images.md` (open each with the Read tool). Also fetch the wiring diagram page live: its title is the `Wiring diagram page` value in `$PROJECT_ROOT/lab_config.md`; fetch it by running `python -c "from lab_agent.sources.labarchives import LabArchivesAdapter; arts=LabArchivesAdapter('<WIRING_DIAGRAM_PAGE>').fetch(); print('\n\n'.join(a.content for a in arts if a.content))"` from `$PROJECT_ROOT`. Produce a single Markdown document with exactly these sections (## headings) and write it to `<out_dir>/extracted_labarchives.md`:
+> You are the LabArchives Analyst. Read `<out_dir>/labarchives.md` and every image file listed in `<out_dir>/labarchives_images.md` (open each with the Read tool). Also fetch the wiring diagram page live: its title is the `Wiring diagram page` value in `$PROJECT_ROOT/lab_config.md`; fetch it by running (from `$PROJECT_ROOT`, so `.env` credentials load regardless of how the session was launched) `python -c "from dotenv import load_dotenv; load_dotenv('.env'); from lab_agent.sources.labarchives import LabArchivesAdapter; arts=LabArchivesAdapter('<WIRING_DIAGRAM_PAGE>').fetch(); print('\n\n'.join(a.content for a in arts if a.content))"`. Produce a single Markdown document with exactly these sections (## headings) and write it to `<out_dir>/extracted_labarchives.md`:
 >
 > **## Timeline** — chronological list of actions/observations with timestamps as they appear in the notebook.
 > **## Lab Observations** — what was actually observed or noted, past tense, sourced from what the notebook says happened.
