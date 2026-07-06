@@ -245,7 +245,7 @@ After Phase C finishes, spawn one Critic agent → writes `<out_dir>/critique.md
 
 > You are the Critic. Read the `[UNSIGNED]` report, all `extracted_*.md`, and `connections.md` in `<out_dir>`. Run this fixed checklist against the report; for each item write PASS or FAIL, and for every FAIL quote the exact failing sentence and explain why. Write the result to `<out_dir>/critique.md`.
 >
-> 1. Every numeric value in the report's Key Parameters table appears with the same number in extracted_github.md or extracted_deps.md.
+> 1. Every numeric value in the report's Key Parameters table matches the value in the extracted file its **Source** column cites — one of extracted_github.md, extracted_deps.md, extracted_labarchives.md, or extracted_dr.md. FAIL a value ONLY if it appears in none of the extracted files (i.e. it is unsourced/invented). Legitimately lab-sourced values (RF attenuation, DAC_CURRENT, hand-recorded saturation amplitudes, reference-clock offsets from lab notes) are NOT failures.
 > 2. No figure description in the report contains visual content not present in the corresponding Figures sub-section of an extracted file.
 > 3. "Confirms" is not used unless connections.md documents a direct quantitative comparison that supports it.
 > 4. No step is described as executed that appears in the Goal vs. Executed map in connections.md as "no".
@@ -390,7 +390,7 @@ One paragraph: what was done, key result, and one-line physical interpretation.
 State the specific experiment objectives as a short bulleted list (e.g. "identify resonance frequencies by VNA", "measure parity telegraph timestream"). Written for lab members already expert in the platform — no general-audience explanation of basic concepts. Do not explain what a qubit is, what dispersive readout is, or any other concept the lab already knows. Focus only on what makes this specific experiment distinct from prior runs.
 
 **4. Key Parameters**
-A single formatted table of all critical instrument settings and software constants extracted from `extracted_github.md` and `extracted_deps.md`, with RF attenuation values from `extracted_labarchives.md`. Use diagram values where they conflict with notebook values (discrepancies are documented in `connections.md`). Include DR temperature row if `extracted_dr.md` is present.
+A single formatted table of all critical instrument settings and software constants extracted from `extracted_github.md` and `extracted_deps.md`, with RF attenuation values from `extracted_labarchives.md`. Use the columns `Parameter | Value | Units | Notes | Source`, where **Source** names where each value came from (e.g. `GitHub notebooks`, `dependency source`, `lab notes`, `wiring diagram`, `DR data`) and corresponds to the extracted file it was taken from. Use diagram values where they conflict with notebook values (discrepancies are documented in `connections.md`). Include DR temperature row if `extracted_dr.md` is present.
 This table appears once and only once. Do not create a second numeric summary table in Results.
 
 **5. Methods and Workflow**
