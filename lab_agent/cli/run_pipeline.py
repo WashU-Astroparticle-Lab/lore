@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from ..config import OUTPUT_ROOT, load_env
@@ -106,11 +107,15 @@ def _find_github_urls(artifacts: list[CollectedArtifact]) -> list[str]:
 def run(github_url: str | None, la_pages: list[str]) -> str:
     la_artifacts: list[CollectedArtifact] = []
 
-    # 1. Fetch LabArchives pages first — they may contain GitHub URLs
+    # 1. Fetch LabArchives pages first — they may contain GitHub URLs.
+    # Pages are independent, so fetch them concurrently; pool.map preserves
+    # input order so the assembled artifacts match the sequential layout.
     if la_pages:
         for page in la_pages:
             print(f"[runner] Fetching LabArchives: {page!r}")
-            la_artifacts.extend(LabArchivesAdapter(page).fetch())
+        with ThreadPoolExecutor(max_workers=min(4, len(la_pages))) as pool:
+            for arts in pool.map(lambda p: LabArchivesAdapter(p).fetch(), la_pages):
+                la_artifacts.extend(arts)
 
     # If no GitHub URL was given, look for one embedded in the LabArchives content
     discovered_urls: list[str] = []

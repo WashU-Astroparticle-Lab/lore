@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 
 from ...models import CollectedArtifact
@@ -499,45 +500,70 @@ class LabArchivesAdapter(ImageDownloadMixin):
         # Slugify the ref for use in filenames (avoids collisions across pages)
         safe_ref = re.sub(r"[^\w]", "_", str(ref))[:40].strip("_")
 
-        # Build image artifacts — attachment entries first
-        image_artifacts: list[CollectedArtifact] = []
-        for filename, download_url, caption in parse_image_entries(xml_text):
+        # Build image artifacts — downloads are independent, so run them
+        # concurrently; pool.map preserves entry order so artifact ordering
+        # (and hence manifest/report ordering) matches the sequential layout.
+        attachment_entries = parse_image_entries(xml_text)
+        embedded_urls = list(enumerate(extract_embedded_img_urls(xml_text), start=1))
+
+        def _fetch_attachment(item: tuple[str, str, str]) -> CollectedArtifact | None:
+            filename, download_url, caption = item
             print(f"[LabArchives] Downloading attachment image: {filename}")
             try:
                 raw = self._download_bytes(download_url)
-                image_artifacts.append(CollectedArtifact(
+                return CollectedArtifact(
                     path=f"labarchives://{ref}/{filename}",
                     kind="figure",
                     description=f"LabArchives image: {caption}",
                     exists=True,
                     raw_bytes=raw,
                     source="labarchives",
-                ))
+                )
             except RuntimeError as exc:
                 print(f"[LabArchives] Warning: skipping attachment {filename} — {exc}")
+                return None
 
-        # Embedded <img> images inside rich-text entry HTML
-        cookie_errors: list[str] = []
-        for i, img_url in enumerate(extract_embedded_img_urls(xml_text), start=1):
+        def _fetch_embedded(item: tuple[int, str]) -> CollectedArtifact | str | None:
+            """Return an artifact, a cookie-error message (str), or None (skipped)."""
+            i, img_url = item
             print(f"[LabArchives] Downloading embedded image {i}: {img_url[:70]}…")
             try:
                 raw, content_type = self._download_image(img_url)
                 ext = CT_TO_EXT.get(content_type, ".png")
                 filename = f"{safe_ref}_img_{i}{ext}"
-                image_artifacts.append(CollectedArtifact(
+                return CollectedArtifact(
                     path=f"labarchives://{ref}/{filename}",
                     kind="figure",
                     description=f"LabArchives embedded image {i} (from page: {ref})",
                     exists=True,
                     raw_bytes=raw,
                     source="labarchives",
-                ))
+                )
             except RuntimeError as exc:
                 msg = str(exc)
                 if "expired" in msg.lower() or "LA_SESSION_COOKIE" in msg or "get_la_cookies" in msg:
-                    cookie_errors.append(msg)
-                else:
-                    print(f"[LabArchives] Warning: skipping embedded image {i} — {exc}")
+                    return msg
+                print(f"[LabArchives] Warning: skipping embedded image {i} — {exc}")
+                return None
+
+        # Resolve session cookies once up front — _download_image lazily resolves
+        # them on first need, and doing that inside the pool would race.
+        if embedded_urls:
+            self._ensure_session_cookies()
+
+        image_artifacts: list[CollectedArtifact] = []
+        cookie_errors: list[str] = []
+        n_downloads = len(attachment_entries) + len(embedded_urls)
+        if n_downloads:
+            with ThreadPoolExecutor(max_workers=min(8, n_downloads)) as pool:
+                attachment_results = pool.map(_fetch_attachment, attachment_entries)
+                embedded_results = pool.map(_fetch_embedded, embedded_urls)
+                image_artifacts.extend(a for a in attachment_results if a is not None)
+                for result in embedded_results:
+                    if isinstance(result, str):
+                        cookie_errors.append(result)
+                    elif result is not None:
+                        image_artifacts.append(result)
 
         if cookie_errors:
             raise RuntimeError(
