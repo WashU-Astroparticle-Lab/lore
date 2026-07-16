@@ -224,11 +224,11 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
         Each Slack reply spawns a fresh session. Read the conversation history carefully to
         determine what stage the pipeline is at before doing anything:
 
-        - If history shows "Data fetched" and then the bot asked about DR conditions,
-          and the latest message is the user's answer (yes/no): this session's job is ONLY
-          to handle the DR question and continue from there. Do NOT re-check credentials or
-          re-run run.py. The output files already exist in outputs/ — read them and write
-          the report (or fetch DR data first if the user said yes).
+        - If history shows the bot asked about DR conditions and the latest message is the
+          user's answer (yes with a date/window, or no): the fetch and Phase A analysis are
+          already done. Do NOT re-check credentials, re-run run.py, or re-run Phase A. The
+          outputs/<experiment_id>/ files (including extracted_*.md) already exist — resolve
+          the DR answer per CLAUDE.md Step 2b and continue from Phase B.
 
         - If history shows the report was already uploaded, and the user is asking to redo it:
           check whether outputs/<experiment_id>/ already has the data files (labarchives.md,
@@ -240,26 +240,29 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
 
         Pipeline steps and Slack progress updates (only for a fresh pipeline run):
 
-          1. Before checking .env:
-             Post: "Checking credentials..."
-          2. Before running run.py:
-             Post: "Fetching GitHub and LabArchives data..."
-          3. If run.py reports expired cookies, run `python get_la_cookies.py` immediately
+          1. FIRST, before anything else (unless the user's request already answered it):
+             Post the DR question via Python and continue immediately — do NOT wait:
+               "While I fetch the data — would you like dilution refrigerator conditions
+               included in this report? If yes, reply with the date and time window of your
+               measurement (e.g. 'Feb 18 2025' or 'Feb 18 2025, 14:00–22:00'). If not,
+               just say 'no'."
+          2. Post: "Checking credentials..." then check .env.
+          3. Post: "Fetching GitHub and LabArchives data..." then run run.py.
+             If run.py reports expired cookies, run `python get_la_cookies.py` immediately
              (never ask the user), then post: "Session cookies refreshed, retrying fetch..."
              and rerun run.py.
-          4. After run.py completes (IMPORTANT — DR conditions pause):
-             Write ONLY this as your final text output and exit immediately. Do not post
-             anything via Python. Do not add any other text before or after.
-               "Pipeline finished. Would you like to include dilution refrigerator conditions
-               in this report? If yes, please give me the date and time window of your
-               measurement (e.g. 'Feb 18 2025' or 'Feb 18 2025, 14:00–22:00')."
-             The system delivers this to the user. The next session reads their reply and
-             continues. Do NOT write "I've posted..." or any other meta-commentary.
-          5. (Next session, after user answers DR question) Before running Phase A:
-             Post: "Writing report..."
-          6. After saving the report file:
+          4. Immediately after run.py completes: post "Data fetched — analyzing..." and
+             spawn the Phase A analysts (CLAUDE.md Step 3) WITHOUT waiting for the DR answer.
+          5. When Phase A finishes, check the thread for the user's DR answer
+             (conversations.replies via Python, using the Reply-to coordinates above):
+             - yes + date/window → fetch DR data and run dr-analyst (CLAUDE.md Step 2b)
+             - no → continue
+             - no answer yet → write the Step 2b reminder as your final text output and
+               exit; the next session continues from Phase B.
+          6. Post: "Writing report..." then run Phases B, C, D per CLAUDE.md.
+          7. After saving the report file:
              Post: "Report written. Uploading to LabArchives..."
-          7. After upload completes, write your final summary as normal text output
+          8. After upload completes, write your final summary as normal text output
              (do NOT post it yourself — the system delivers your final output automatically).
              Include: what experiment was reported, key findings (2-3 bullets), confirmation
              it's live in LabArchives under the upload folder, tagging <@{user}>.

@@ -1,6 +1,6 @@
 # LORE — Pipeline Instructions
 
-When the user gives you a GitHub URL and LabArchives page names, run the full pipeline and write the report (Steps 1–4 below).
+When the user gives you a GitHub URL and LabArchives page names, run the full pipeline and write the report (Steps 0–4 below).
 
 If the user asks for a **DR-only conditions report** (no GitHub URL, just a date or time window), skip directly to the DR-Only Report workflow at the bottom of this file.
 
@@ -69,6 +69,17 @@ You can search and read LabArchives pages directly via the `lab_agent.sources.la
 2. Search LabArchives by approximate page title
 3. Only ask the user if both fail
 
+## Step 0 — ask the DR question up front (never wait for the answer)
+
+Ask about dilution refrigerator conditions **immediately, before any fetching**, so the user can answer while the pipeline runs. The question:
+
+> While I fetch the data — would you like dilution refrigerator conditions included in this report?
+> If yes, reply with the date and time window of your measurement (e.g. 'Feb 18 2025' or 'Feb 18 2025, 14:00–22:00'). If not, just say "no".
+
+- **Slack session** (the spawning prompt has a `Reply-to` line): post the question to the thread via `chat.postMessage` (Python, as shown in the spawning prompt), then **continue straight to Step 1 without waiting**. The answer is collected later, in Step 2b.
+- **Interactive session** (no Slack context): ask the question in chat and continue when the user answers.
+- If the user's original request already answers it (e.g. "include DR conditions for Feb 18" or "no DR needed"), skip the question entirely and treat the answer as resolved.
+
 ## Step 1 — verify .env is populated
 
 ```bash
@@ -105,20 +116,17 @@ python run.py "<la_page_name_1>" "<la_page_name_2>"
 
 **If run.py exits with `COOKIE_REFRESH_NEEDED`:** immediately run `python get_la_cookies.py` (never ask the user), then rerun the exact same `run.py` command. Do not proceed without images — the report requires them.
 
-## Step 2b — ask about cryogenic data (always do this before writing the report)
+## Step 2b — resolve the DR answer (checked after Phase A, never before)
 
-After `run.py` finishes, **always** ask the user about DR conditions. Write the question as your **final text output and exit immediately** — the system delivers it to the user automatically. Do NOT post this via Python; do NOT add any preamble, explanation, or sign-off text around it.
+The DR question was already asked in Step 0. Do **not** block Steps 2–3 on the answer — go straight from `run.py` to Phase A (Step 3). Check for the answer only when Phase A finishes, right before Phase B:
 
-Your final output should be exactly:
+- **Slack session:** fetch the thread with `conversations.replies` (channel + thread_ts from the `Reply-to` line) and look for the user's reply after the DR question.
+- **Interactive session:** the answer is already in the conversation.
 
-> Pipeline finished. Would you like to include dilution refrigerator conditions in this report?
-> If yes, please give me the date and time window of your measurement (e.g. 'Feb 18 2025' or 'Feb 18 2025, 14:00–22:00').
-
-Then exit. When the user replies, the next session will read the thread history to see the experiment ID and the user's answer, and continue from there.
-
-**In the next session:** check the conversation history. The user's answer to the DR question is already there. Do NOT re-ask. Read the answer and continue:
-- User said **yes** with a date/window → fetch DR data (below), then go to Step 3
-- User said **no** → go directly to Step 3, skip DR entirely
+Then:
+- User said **yes** with a date/window → fetch DR data (below), spawn `dr-analyst` (Step 3, Phase A), wait for it, then proceed to Phase B
+- User said **no** → proceed directly to Phase B, skip DR entirely — do not mention DR conditions anywhere in the report
+- **No answer yet** (Slack only) → write this reminder as your final text output and exit (the system delivers it): *"The report analysis is ready — I just need your answer on dilution refrigerator conditions to finish. Reply with a date/time window to include them, or 'no' to skip."* The next session picks up from here: outputs and `extracted_*.md` files already exist, so it must NOT re-run `run.py` or Phase A — it resolves the DR answer and continues from Phase B.
 
 If the user says **yes** and provides a date/window:
 
@@ -151,13 +159,11 @@ print(md if md else 'NO_DATA')
 
 Replace `DR_DATA_PATH_FROM_ENV` with the value of `DR_DATA_PATH` from `.env`. Save the output to `outputs/<experiment_id>/dr_conditions.md`.
 
-If the user says **no**, skip entirely — do not mention DR conditions anywhere in the report.
-
 ## Step 3 — multi-agent report generation
 
-After `run.py` finishes and DR conditions are decided (Step 2b), generate the report by spawning the project subagents defined in `.claude/agents/`. Do **not** write the report yourself.
+**Immediately after `run.py` finishes** — do not wait for the DR answer — generate the report by spawning the project subagents defined in `.claude/agents/`. Do **not** write the report yourself.
 
-Run the four phases in strict sequence: **Phase A** (analysts, concurrent) → **Phase B** (waits for all of A) → **Phase C** (waits for B) → **Phase D** (waits for C; may trigger one Phase C revision).
+Phase order: **Phase A** (analysts, concurrent; starts right after run.py) → **resolve DR answer (Step 2b)**, spawning `dr-analyst` if needed → **Phase B** (waits for all extractions) → **Phase C** (waits for B) → **Phase D** (waits for C; may trigger one Phase C revision).
 
 **Conventions for every subagent:**
 - Let `<out_dir>` = `$PROJECT_ROOT/outputs/<experiment_id>`. Pass it literally in each spawn prompt — the agent definitions expect it.
@@ -168,16 +174,19 @@ Run the four phases in strict sequence: **Phase A** (analysts, concurrent) → *
 
 ### Phase A — parallel extraction (concurrent subagents)
 
-Spawn all applicable analysts in **one message**, each with the prompt `<out_dir> = <the actual path>`:
+Spawn the three main analysts in **one message, immediately after run.py** (do not wait for the DR answer), each with the prompt `<out_dir> = <the actual path>`:
 
 - **`github-analyst`** → writes `<out_dir>/extracted_github.md`
 - **`labarchives-analyst`** → writes `<out_dir>/extracted_labarchives.md` (also fetches the wiring diagram page live)
 - **`deps-analyst`** → writes `<out_dir>/extracted_deps.md`
-- **`dr-analyst`** → writes `<out_dir>/extracted_dr.md` — **spawn only if `<out_dir>/dr_conditions.md` exists**
+
+When they finish, resolve the DR answer (Step 2b). If the answer is yes, fetch the DR data and spawn the late Phase A member:
+
+- **`dr-analyst`** → writes `<out_dir>/extracted_dr.md` — **spawn only once `<out_dir>/dr_conditions.md` exists**
 
 ### Phase B — synthesis (1 subagent)
 
-After all Phase A agents finish, spawn **`synthesis`** with the same `<out_dir>` prompt → writes `<out_dir>/connections.md`.
+After all Phase A agents finish **and the DR answer is resolved** (yes + dr-analyst done, or no), spawn **`synthesis`** with the same `<out_dir>` prompt → writes `<out_dir>/connections.md`.
 
 ### Phase C — report writing (1 subagent)
 
