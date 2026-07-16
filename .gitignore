@@ -44,5 +44,7 @@ build/
 # Jupyter
 .ipynb_checkpoints/
 
-# Claude Code project memory (machine-local)
-.claude/
+# Claude Code project state (machine-local) — but agent definitions are
+# part of the pipeline and ARE committed (.claude/agents/).
+.claude/*
+!.claude/agents/

@@ -69,8 +69,8 @@ cd lab-agent
 
 ```bash
 conda activate presto
-pip install presto-2.16.0-py3-none-any.whl
-pip install -r requirements.txt
+pip install vendor/presto-2.16.0-py3-none-any.whl
+pip install -e .
 playwright install chromium
 ```
 
