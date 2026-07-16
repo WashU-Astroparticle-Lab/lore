@@ -33,7 +33,9 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from ..config import OUTPUT_ROOT, load_env
+import time
+
+from ..config import OUTPUT_ROOT, PROJECT_ROOT, lab_config_value, load_env
 
 load_env()
 
@@ -106,6 +108,42 @@ def _find_github_urls(artifacts: list[CollectedArtifact]) -> list[str]:
     return urls
 
 
+_WIRING_CACHE = PROJECT_ROOT / "cache" / "wiring_diagram.md"
+_WIRING_TTL_SECONDS = 7 * 24 * 3600
+
+
+def _fetch_wiring_diagram() -> str | None:
+    """Return the wiring diagram page as Markdown, from cache when fresh.
+
+    The labarchives-analyst agent needs this page every run; prefetching it
+    here (text only, concurrently with the page fetches) saves the agent a
+    live LabArchives search at report time. The diagram rarely changes, so a
+    7-day disk cache skips even that.
+    """
+    title = lab_config_value("Wiring diagram page").strip()
+    if not title:
+        return None
+    if _WIRING_CACHE.exists() and time.time() - _WIRING_CACHE.stat().st_mtime < _WIRING_TTL_SECONDS:
+        print("[runner] Wiring diagram served from cache.")
+        return _WIRING_CACHE.read_text(encoding="utf-8")
+    try:
+        arts = LabArchivesAdapter(title).fetch(include_images=False)
+    except Exception as exc:
+        print(f"[runner] Warning: wiring diagram fetch failed ({exc}); "
+              "the labarchives-analyst will fetch it live instead.")
+        return None
+    text = "\n\n".join(a.content for a in arts if a.content)
+    if not text:
+        return None
+    md = f"# Wiring Diagram — {title}\n\n{text}"
+    try:
+        _WIRING_CACHE.parent.mkdir(exist_ok=True)
+        _WIRING_CACHE.write_text(md, encoding="utf-8")
+    except OSError as exc:
+        print(f"[runner] Warning: could not cache wiring diagram: {exc}")
+    return md
+
+
 def run(github_url: str | None, la_pages: list[str]) -> str:
     # 0. Fail fast on an expired web session BEFORE any fetching. Previously an
     # expired cookie only surfaced after the full text+image fetch, forcing a
@@ -121,6 +159,12 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
         sys.exit(3)
 
     la_artifacts: list[CollectedArtifact] = []
+
+    # Kick off the wiring diagram prefetch in the background; the result is
+    # collected right before files are written.
+    wiring_pool = ThreadPoolExecutor(max_workers=1)
+    wiring_future = wiring_pool.submit(_fetch_wiring_diagram)
+    wiring_pool.shutdown(wait=False)
 
     # 1. Fetch LabArchives pages first — they may contain GitHub URLs.
     # Pages are independent, so fetch them concurrently; pool.map preserves
@@ -226,6 +270,12 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
             "\n".join(manifest_lines), encoding="utf-8"
         )
         print(f"[runner] Saved labarchives_images.md")
+
+    # 5c. Save the prefetched wiring diagram for the labarchives-analyst
+    wiring_md = wiring_future.result()
+    if wiring_md:
+        (out_dir / "wiring_diagram.md").write_text(wiring_md, encoding="utf-8")
+        print(f"[runner] Saved wiring_diagram.md")
 
     # 6. Save GitHub image files
     gh_images = [

@@ -376,8 +376,12 @@ class LabArchivesAdapter(ImageDownloadMixin):
     # Public interface
     # ------------------------------------------------------------------
 
-    def fetch(self) -> list[CollectedArtifact]:
-        """Fetch the LabArchives page and return its entries as CollectedArtifacts."""
+    def fetch(self, include_images: bool = True) -> list[CollectedArtifact]:
+        """Fetch the LabArchives page and return its entries as CollectedArtifacts.
+
+        With ``include_images=False`` only text entries are returned — no image
+        downloads and no session-cookie requirement.
+        """
         # Step 1: resolve page tree_id and notebook ID.
         page_tree_id: str | None = None
         nbid: str | None = None
@@ -522,6 +526,9 @@ class LabArchivesAdapter(ImageDownloadMixin):
                 )
                 for i, (label, content) in enumerate(entries)
             ]
+
+        if not include_images:
+            return text_artifacts
 
         # Slugify the ref for use in filenames (avoids collisions across pages)
         safe_ref = re.sub(r"[^\w]", "_", str(ref))[:40].strip("_")
