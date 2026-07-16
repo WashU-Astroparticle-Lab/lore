@@ -114,7 +114,7 @@ python run.py "<la_page_name_1>" "<la_page_name_2>"
   - `labarchives_images/` + `labarchives_images.md` — images from LabArchives (attachments + embedded)
   - `dr_conditions.md` — dilution refrigerator temperatures and pressures (written only if the user requests it — see Step 2b)
 
-**If run.py exits with `COOKIE_REFRESH_NEEDED`:** immediately run `python get_la_cookies.py` (never ask the user), then rerun the exact same `run.py` command. Do not proceed without images — the report requires them.
+**If run.py exits with `COOKIE_REFRESH_NEEDED`:** immediately run `python get_la_cookies.py` (never ask the user), then rerun the exact same `run.py` command. Do not proceed without images — the report requires them. (run.py probes cookie validity before fetching anything, so this normally fails within seconds, and the rerun is cheap: page lookups and GitHub files are served from local caches.)
 
 ## Step 2b — resolve the DR answer (checked after Phase A, never before)
 

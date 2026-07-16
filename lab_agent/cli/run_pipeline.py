@@ -27,6 +27,7 @@ Output folder: outputs/<experiment_id>/
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -44,6 +45,7 @@ from ..models import (
 )
 from ..sources import GitHubAdapter, LabArchivesAdapter
 from ..sources.github import parse_github_url
+from ..sources.labarchives.auth import cookies_still_valid
 
 _ID_STOPWORDS = {"and", "or", "the", "a", "an", "in", "to", "of", "for", "with",
                  "new", "at", "by", "on", "its", "is", "was", "are"}
@@ -105,6 +107,19 @@ def _find_github_urls(artifacts: list[CollectedArtifact]) -> list[str]:
 
 
 def run(github_url: str | None, la_pages: list[str]) -> str:
+    # 0. Fail fast on an expired web session BEFORE any fetching. Previously an
+    # expired cookie only surfaced after the full text+image fetch, forcing a
+    # complete rerun. One probe request catches it in seconds instead.
+    cookie_str = os.environ.get("LA_SESSION_COOKIE", "").strip()
+    if la_pages and cookie_str and not cookies_still_valid(cookie_str):
+        print(
+            "[runner] COOKIE_REFRESH_NEEDED: LA_SESSION_COOKIE is expired "
+            "(detected by pre-fetch probe, nothing was fetched).\n"
+            "Run:  python get_la_cookies.py\n"
+            "Then rerun this command."
+        )
+        sys.exit(3)
+
     la_artifacts: list[CollectedArtifact] = []
 
     # 1. Fetch LabArchives pages first — they may contain GitHub URLs.
