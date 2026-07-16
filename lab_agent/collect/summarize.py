@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import io
 
-from .models import CollectedArtifact, ExperimentBundle, StructuredSummary
+from ..models import CollectedArtifact, ExperimentBundle, StructuredSummary
 
 # CSVs with more data rows than this are summarised rather than rendered as a table.
 _LARGE_CSV_THRESHOLD = 20

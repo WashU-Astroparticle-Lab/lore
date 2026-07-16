@@ -69,8 +69,8 @@ cd lab-agent
 
 ```bash
 conda activate presto
-pip install presto-2.16.0-py3-none-any.whl
-pip install -r requirements.txt
+pip install vendor/presto-2.16.0-py3-none-any.whl
+pip install -e .
 playwright install chromium
 ```
 
@@ -134,30 +134,63 @@ To auto-start on Windows login, create a Task Scheduler task:
 
 ```
 lab-agent/
-├── CLAUDE.md                  # Instructions for the Claude Code agent
+├── CLAUDE.md                  # Orchestration workflow for the Claude Code agent
 ├── README.md                  # This file
-├── requirements.txt
-├── run.py                     # Fetches GitHub + LabArchives artifacts
-├── run_dr.py                  # Parses Leiden Cryogenics .dat files
-├── upload_to_labarchives.py   # Uploads reports to LabArchives
-├── slack_listener.py          # Slack bot
-├── get_la_cookies.py          # WashU SSO cookie refresh
-├── presto-2.16.0-py3-none-any.whl
-└── lab_agent/
-    ├── models.py              # Data models
-    ├── discover.py            # File classification + artifact discovery
-    ├── ingest.py              # Notebook/CSV parsing
-    ├── summarize.py           # Builds structured summary for Claude
-    ├── dependencies.py        # Fetches lab-internal package source from GitHub
-    ├── upload.py              # HTML conversion + image inlining for LabArchives
-    ├── dr_conditions.py       # Leiden Cryogenics .dat parsing and thermal event detection
-    └── sources/
-        ├── github.py          # GitHub API client
-        └── labarchives.py     # LabArchives API client + image downloader
+├── pyproject.toml             # Package metadata + dependencies (pip install -e .)
+├── lab_config.template.md     # Copy to lab_config.md (gitignored) and fill in
+│
+├── .claude/agents/            # Committed subagent definitions for report phases
+│   ├── github-analyst.md      #   Phase A: notebook/code extraction
+│   ├── labarchives-analyst.md #   Phase A: lab-notes extraction + wiring diagram
+│   ├── deps-analyst.md        #   Phase A: dependency source analysis
+│   ├── dr-analyst.md          #   Phase A: DR conditions physics analysis
+│   ├── synthesis.md           #   Phase B: cross-source connections
+│   ├── report-writer.md       #   Phase C: report writing (+ revision mode)
+│   └── critic.md              #   Phase D: accuracy checklist
+│
+├── docs/
+│   ├── dr_physics_reference.md  # DR physics knowledge (read by dr-analyst)
+│   └── report_style_guide.md    # Report structure + accuracy rules
+│
+├── run.py                     # Shim → lab_agent/cli/run_pipeline.py
+├── run_dr.py                  # Shim → lab_agent/cli/run_dr.py
+├── upload_to_labarchives.py   # Shim → lab_agent/cli/upload.py
+├── slack_listener.py          # Shim → lab_agent/slack/listener.py
+├── get_la_cookies.py          # Shim → lab_agent/cli/cookies.py
+│
+├── lab_agent/
+│   ├── config.py              # PROJECT_ROOT, .env loading, lab_config.md parsing
+│   ├── models.py              # Data models
+│   ├── sources/               # ── data in ──
+│   │   ├── github.py          #   GitHub API client
+│   │   └── labarchives/       #   LabArchives client
+│   │       ├── adapter.py     #     page resolution, tree traversal, fetch
+│   │       ├── auth.py        #     HMAC signing + session cookies
+│   │       └── images.py      #     attachment/embedded image download
+│   ├── collect/               # ── experiment pipeline stages ──
+│   │   ├── discover.py        #   File classification + artifact discovery
+│   │   ├── ingest.py          #   Notebook/CSV parsing
+│   │   ├── summarize.py       #   Builds structured summary for Claude
+│   │   └── dependencies.py    #   Fetches lab-internal package source from GitHub
+│   ├── dr/                    # ── cryogenics ──
+│   │   └── conditions.py      #   Leiden Cryogenics .dat parsing + thermal events
+│   ├── publish/               # ── data out ──
+│   │   └── labarchives.py     #   HTML conversion + image inlining + upload
+│   ├── slack/                 # ── front end ──
+│   │   ├── listener.py        #   Bolt app + event handlers
+│   │   ├── history.py         #   Thread-history assembly
+│   │   ├── sessions.py        #   Claude Code session spawning + reaper
+│   │   └── api.py             #   Low-level Slack Web API helpers
+│   └── cli/                   # Argument parsing for the root shims
+│
+├── tests/
+│   └── test_la_upload_limit.py
+└── vendor/
+    └── presto-2.16.0-py3-none-any.whl
 ```
 
 ---
 
 ## LabArchives
 
-Reports are uploaded to the **AI Agent** folder inside the **Qubit & KID** notebook. Create that folder in LabArchives if it does not already exist.
+Reports are uploaded to the folder named by `Upload folder` inside the `Primary notebook` notebook (both set in `lab_config.md`; defaults: **AI Agent** in **Qubit & KID**). Create that folder in LabArchives if it does not already exist.

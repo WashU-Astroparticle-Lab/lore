@@ -22,13 +22,13 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-_PROJECT_ROOT = Path(__file__).parent.resolve()
+_PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 load_dotenv(_PROJECT_ROOT / ".env", override=True)
 
 sys.path.insert(0, str(_PROJECT_ROOT))
-from lab_agent.upload import (
+from lab_agent.publish.labarchives import (
     _get_adapter,
-    _find_ai_agent_folder,
+    _find_upload_folder,
     _insert_page,
     _add_text_entry,
 )
@@ -78,8 +78,8 @@ def _try_post(nbid: str, page_tree_id: str, html: str) -> bool:
 def main() -> None:
     print("[test] Connecting to LabArchives…")
     adapter = _get_adapter()
-    nbid, folder_tree_id = _find_ai_agent_folder(adapter)
-    print(f"[test] Found AI Agent folder. Creating test page…")
+    nbid, folder_tree_id = _find_upload_folder(adapter)
+    print(f"[test] Found upload folder. Creating test page…")
     page_tree_id = _insert_page(nbid, folder_tree_id, "_upload_limit_test_DELETE_ME")
     print(f"[test] Test page created (tree_id={page_tree_id[:40]}…)")
 
