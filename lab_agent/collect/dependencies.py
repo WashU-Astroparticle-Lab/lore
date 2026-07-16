@@ -16,10 +16,14 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import NamedTuple
+
+from ..config import PROJECT_ROOT
 
 # ---------------------------------------------------------------------------
 # Well-known packages to skip — not worth fetching
@@ -149,6 +153,37 @@ def _list_org_repos(owner: str, token: str) -> dict[str, str]:
     return repos
 
 
+_ORG_REPO_TTL_SECONDS = 24 * 3600
+
+
+def _org_repo_cache_path(owner: str) -> Path:
+    safe_owner = re.sub(r"[^\w-]", "_", owner.lower())
+    return PROJECT_ROOT / "cache" / f"org_repos_{safe_owner}.json"
+
+
+def _list_org_repos_cached(owner: str, token: str) -> tuple[dict[str, str], bool]:
+    """Return ({repo_name_lower: default_branch}, from_cache).
+
+    The org's repo list changes rarely, so it is cached for 24 h. Callers that
+    fail to match a package against a cached list should refresh once
+    (see build_dependencies_md) in case the repo was created recently.
+    """
+    cache_path = _org_repo_cache_path(owner)
+    try:
+        if cache_path.exists() and time.time() - cache_path.stat().st_mtime < _ORG_REPO_TTL_SECONDS:
+            return json.loads(cache_path.read_text(encoding="utf-8")), True
+    except Exception:
+        pass
+    repos = _list_org_repos(owner, token)
+    if repos:
+        try:
+            cache_path.parent.mkdir(exist_ok=True)
+            cache_path.write_text(json.dumps(repos, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+    return repos, False
+
+
 def _fetch_package_source(
     owner: str,
     repo: str,
@@ -195,35 +230,67 @@ def _fetch_package_source(
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def resolve_dependencies(
-    out_dir: Path,
-    bundle_artifacts,
-    owner: str,
-) -> None:
+def _match_repo(package: str, org_repos: dict[str, str]) -> str | None:
+    for candidate in [package, package.replace("_", "-"), package.replace("-", "_")]:
+        if candidate.lower() in org_repos:
+            return next(k for k in org_repos if k.lower() == candidate.lower())
+    return None
+
+
+def build_dependencies_md(bundle_artifacts, owner: str) -> str | None:
     """Scan notebooks for lab-specific imports, find them in the GitHub org,
-    fetch relevant source, and write dependencies.md to out_dir.
+    fetch relevant source, and return the dependencies.md content.
+
+    Returns None when there is nothing to write (no token / no imports).
 
     Args:
-        out_dir: Experiment output directory.
         bundle_artifacts: All collected artifacts from the bundle.
         owner: GitHub org/user to search (e.g. "WashU-Astroparticle-Lab").
     """
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
         print("[deps] No GITHUB_TOKEN — skipping dependency resolution.")
-        return
+        return None
 
     print(f"[deps] Scanning notebooks for lab-specific imports…")
     imports = _collect_imports_from_notebooks(bundle_artifacts)
 
     if not imports:
         print("[deps] No lab-specific imports found.")
-        return
+        return None
 
     print(f"[deps] Found candidate packages: {', '.join(sorted(imports))}")
 
-    # List all repos in the org once
-    org_repos = _list_org_repos(owner, token)
+    # List all repos in the org (24 h disk cache). If a package fails to match
+    # against a cached list, refresh once — the repo may be newer than the cache.
+    org_repos, from_cache = _list_org_repos_cached(owner, token)
+    if from_cache and any(_match_repo(p, org_repos) is None for p in imports):
+        try:
+            _org_repo_cache_path(owner).unlink()
+        except OSError:
+            pass
+        org_repos, _ = _list_org_repos_cached(owner, token)
+
+    # Plan the source fetches, then run them concurrently (network-bound):
+    # each package needs one or more contents-API calls.
+    plans: dict[str, tuple[str, str, list[str]]] = {}  # package -> (repo, branch, submodules)
+    for package, import_list in sorted(imports.items()):
+        repo_name = _match_repo(package, org_repos)
+        if repo_name is not None:
+            submodules = list(dict.fromkeys(
+                imp.submodule for imp in import_list if imp.submodule
+            ))
+            plans[package] = (repo_name, org_repos[repo_name.lower()], submodules)
+
+    sources: dict[str, dict[str, str]] = {}
+    if plans:
+        def _fetch_one(package: str) -> dict[str, str]:
+            repo_name, branch, submodules = plans[package]
+            print(f"[deps] Fetching source for `{package}` from {owner}/{repo_name}…")
+            return _fetch_package_source(owner, repo_name, branch, package, submodules, token)
+
+        with ThreadPoolExecutor(max_workers=min(8, len(plans))) as pool:
+            sources = dict(zip(plans, pool.map(_fetch_one, plans)))
 
     lines: list[str] = [
         "# Dependency Source Code",
@@ -234,10 +301,6 @@ def resolve_dependencies(
     ]
 
     for package, import_list in sorted(imports.items()):
-        # Collect unique submodules imported
-        submodules = list(dict.fromkeys(
-            imp.submodule for imp in import_list if imp.submodule
-        ))
         imported_names = list(dict.fromkeys(
             name for imp in import_list for name in imp.names if name
         ))
@@ -245,14 +308,7 @@ def resolve_dependencies(
         lines.append(f"## `{package}`")
         lines.append("")
 
-        # Check if it's in the org
-        repo_name = None
-        for candidate in [package, package.replace("_", "-"), package.replace("-", "_")]:
-            if candidate.lower() in org_repos:
-                repo_name = next(k for k in org_repos if k.lower() == candidate.lower())
-                break
-
-        if repo_name is None:
+        if package not in plans:
             lines.append(f"**Source:** Not found in `{owner}` — likely an external package.")
             lines.append("")
             seen: set[str] = set()
@@ -269,7 +325,7 @@ def resolve_dependencies(
             lines.append("")
             continue
 
-        branch = org_repos[repo_name.lower()]
+        repo_name, branch, _submodules = plans[package]
         lines.append(f"**Source:** `{owner}/{repo_name}` (branch: `{branch}`)")
         lines.append("")
 
@@ -277,9 +333,7 @@ def resolve_dependencies(
             lines.append(f"**Symbols used:** `{'`, `'.join(imported_names)}`")
             lines.append("")
 
-        print(f"[deps] Fetching source for `{package}` from {owner}/{repo_name}…")
-        source_files = _fetch_package_source(owner, repo_name, branch, package, submodules, token)
-
+        source_files = sources.get(package) or {}
         if not source_files:
             lines.append("_Source files could not be retrieved._")
             lines.append("")
@@ -301,6 +355,17 @@ def resolve_dependencies(
             lines.append("```")
             lines.append("")
 
-    output = "\n".join(lines)
+    return "\n".join(lines)
+
+
+def resolve_dependencies(
+    out_dir: Path,
+    bundle_artifacts,
+    owner: str,
+) -> None:
+    """Build dependencies.md (see build_dependencies_md) and write it to out_dir."""
+    output = build_dependencies_md(bundle_artifacts, owner)
+    if output is None:
+        return
     (out_dir / "dependencies.md").write_text(output, encoding="utf-8")
     print(f"[deps] Saved dependencies.md ({len(output):,} chars)")

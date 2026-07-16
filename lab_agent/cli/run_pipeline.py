@@ -39,7 +39,7 @@ from ..config import OUTPUT_ROOT, PROJECT_ROOT, lab_config_value, load_env
 
 load_env()
 
-from ..collect.dependencies import resolve_dependencies
+from ..collect.dependencies import build_dependencies_md
 from ..collect.summarize import summarize_bundle
 from ..models import (
     ArtifactGroup, CollectedArtifact, ExperimentBundle,
@@ -234,6 +234,15 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
             collected_artifacts=la_artifacts,
         )
 
+    # Kick off dependency resolution in the background (network-bound) so it
+    # overlaps with summarization and file writing; joined at step 8.
+    deps_future = None
+    if github_url:
+        owner, _, _, _ = parse_github_url(github_url)
+        deps_pool = ThreadPoolExecutor(max_workers=1)
+        deps_future = deps_pool.submit(build_dependencies_md, bundle.collected_artifacts, owner)
+        deps_pool.shutdown(wait=False)
+
     # 3. Extract structured content
     summary = summarize_bundle(bundle)
     out_dir = Path(OUTPUT_ROOT) / summary.output_dirname
@@ -307,10 +316,12 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
         (out_dir / "data_summaries.md").write_text("\n\n".join(data_parts), encoding="utf-8")
         print(f"[runner] Saved data_summaries.md")
 
-    # 8. Resolve lab-specific imports (only if GitHub is available)
-    if github_url:
-        owner, _, _, _ = parse_github_url(github_url)
-        resolve_dependencies(out_dir, bundle.collected_artifacts, owner)
+    # 8. Save lab-specific import sources (resolution started before step 3)
+    if deps_future is not None:
+        deps_md = deps_future.result()
+        if deps_md:
+            (out_dir / "dependencies.md").write_text(deps_md, encoding="utf-8")
+            print(f"[deps] Saved dependencies.md ({len(deps_md):,} chars)")
 
     # 9. Write metadata for downstream phase scripts
     metadata = {
