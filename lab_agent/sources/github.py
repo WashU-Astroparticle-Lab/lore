@@ -7,8 +7,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from ..discover import build_artifact_group, synthesize_config, infer_title_from_notebook, infer_objective_from_notebook
-from ..ingest import (
+from ..collect.discover import build_artifact_group, synthesize_config, infer_title_from_notebook, infer_objective_from_notebook
+from ..collect.ingest import (
     TEXT_SUFFIXES,
     csv_rows_from_text,
     csv_table_from_rows,

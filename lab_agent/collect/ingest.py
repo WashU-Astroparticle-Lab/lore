@@ -5,7 +5,7 @@ import io
 import json
 import uuid
 
-from .models import Artifact, ExperimentConfig
+from ..models import Artifact, ExperimentConfig
 
 
 TEXT_SUFFIXES = {".md", ".txt", ".log", ".json"}

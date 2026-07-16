@@ -1,12 +1,12 @@
 """
-dr_conditions.py — Parse Leiden Cryogenics dilution refrigerator .dat files.
+lab_agent/dr/conditions.py — Parse Leiden Cryogenics dilution refrigerator .dat files.
 
 Given a Data folder path and an experiment date, scans LogLCR and logFP files
 for the surrounding time window and returns a markdown summary of temperatures
-and pressures. Designed to be called from run.py after the main pipeline steps.
+and pressures. Called from run_dr.py and from the experiment pipeline (Step 2b).
 
 Usage:
-    from lab_agent.dr_conditions import get_dr_conditions
+    from lab_agent.dr import get_dr_conditions
     md = get_dr_conditions("/path/to/Data", experiment_date, window_hours=12)
     # Returns None if DR_DATA_PATH is not set or no data found for that window.
 """

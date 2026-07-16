@@ -4,7 +4,7 @@ from __future__ import annotations
 import re
 from pathlib import PurePosixPath
 
-from .models import (
+from ..models import (
     Artifact,
     ArtifactGroup,
     ExperimentConfig,

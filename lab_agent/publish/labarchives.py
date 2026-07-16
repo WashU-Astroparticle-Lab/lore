@@ -1,11 +1,11 @@
 """
-lab_agent/upload.py — upload experiment_report.md to LabArchives.
+lab_agent/publish/labarchives.py — upload a finished report to LabArchives.
 
-Creates a new page inside the "AI Agent" folder (Qubit & KID notebook) and
-posts the report content as a rich-text HTML entry, then attaches the raw .md
-file.
+Creates a new page inside the configured upload folder (see lab_config.md:
+`Upload folder` / `Primary notebook`) and posts the report content as a
+rich-text HTML entry, then attaches the raw .md file.
 
-Uses the same sync urllib + HMAC-SHA512 auth as lab_agent/sources/labarchives.py.
+Uses the same sync urllib + HMAC-SHA512 auth as lab_agent/sources/labarchives.
 """
 from __future__ import annotations
 
@@ -20,11 +20,21 @@ import re as _re
 
 import markdown as _md
 
-from .sources.labarchives import _sign_request
+from ..config import lab_config_value
+from ..sources.labarchives import sign_request
 
 _BASE_URL = "https://api.labarchives.com"
-_AI_AGENT_FOLDER_NAME = "AI Agent"
-_TARGET_NOTEBOOK_NAME = "Qubit & KID"
+# Fallbacks used when lab_config.md is absent or missing these keys.
+_DEFAULT_FOLDER_NAME = "AI Agent"
+_DEFAULT_NOTEBOOK_NAME = "Qubit & KID"
+
+
+def _upload_folder_name() -> str:
+    return lab_config_value("Upload folder", _DEFAULT_FOLDER_NAME)
+
+
+def _target_notebook_name() -> str:
+    return lab_config_value("Primary notebook", _DEFAULT_NOTEBOOK_NAME)
 
 
 # ---------------------------------------------------------------------------
@@ -50,7 +60,7 @@ def _post(
     password = os.environ.get("LA_SECRET", "")
     uid = os.environ.get("LA_UID", "")
 
-    auth = _sign_request(akid, password, method)
+    auth = sign_request(akid, password, method)
 
     if form_body:
         # Auth + uid in query string; payload in POST body as form data
@@ -80,7 +90,7 @@ def _post(
 
 def _get_adapter():
     """Return a minimal LabArchivesAdapter for tree traversal (read-only)."""
-    from .sources.labarchives import LabArchivesAdapter
+    from ..sources.labarchives import LabArchivesAdapter
     return LabArchivesAdapter("dummy")
 
 
@@ -88,23 +98,25 @@ def _get_adapter():
 # Tree helpers
 # ---------------------------------------------------------------------------
 
-def _find_ai_agent_folder(adapter) -> tuple[str, str]:
-    """Return (nbid, folder_tree_id) for the AI Agent folder.
+def _find_upload_folder(adapter) -> tuple[str, str]:
+    """Return (nbid, folder_tree_id) for the configured upload folder.
 
-    Searches all notebooks for a top-level folder named 'AI Agent'.
-    Raises RuntimeError if not found.
+    Searches the configured primary notebook for a top-level folder with the
+    configured upload-folder name. Raises RuntimeError if not found.
     """
+    folder_name = _upload_folder_name()
+    notebook_name = _target_notebook_name()
     notebooks = adapter._list_notebooks()
     for nb in notebooks:
-        if nb["name"] != _TARGET_NOTEBOOK_NAME:
+        if nb["name"] != notebook_name:
             continue
         for node in adapter._get_tree_level(nb["nbid"], "0"):
             label = node.findtext("display-text") or ""
-            if label.strip().lower() == _AI_AGENT_FOLDER_NAME.lower():
+            if label.strip().lower() == folder_name.lower():
                 tree_id = node.findtext("tree-id") or ""
                 return nb["nbid"], tree_id
     raise RuntimeError(
-        f"Could not find '{_AI_AGENT_FOLDER_NAME}' folder in '{_TARGET_NOTEBOOK_NAME}' notebook. "
+        f"Could not find '{folder_name}' folder in '{notebook_name}' notebook. "
         "Please create it in LabArchives first."
     )
 
@@ -303,10 +315,11 @@ def _post_overflow_images(nbid: str, page_tree_id: str, overflow_srcs: list[str]
 # ---------------------------------------------------------------------------
 
 def upload_report(out_dir: Path, page_title: str) -> str:
-    """Upload experiment_report.md to the AI Agent folder in LabArchives.
+    """Upload the report in *out_dir* to the configured LabArchives folder.
 
     Steps:
-      1. Find the AI Agent folder in Qubit & KID.
+      1. Find the upload folder (lab_config.md `Upload folder`) in the
+         primary notebook (lab_config.md `Primary notebook`).
       2. Create a new page named *page_title* inside it.
       3. Convert the report Markdown to HTML and post as a rich-text entry.
       4. Attach the raw .md file.
@@ -356,9 +369,9 @@ def upload_report(out_dir: Path, page_title: str) -> str:
                 flush=True,
             )
 
-    print(f"[upload] Locating '{_AI_AGENT_FOLDER_NAME}' folder in LabArchives…")
+    print(f"[upload] Locating '{_upload_folder_name()}' folder in LabArchives…")
     adapter = _get_adapter()
-    nbid, folder_tree_id = _find_ai_agent_folder(adapter)
+    nbid, folder_tree_id = _find_upload_folder(adapter)
     print(f"[upload] Found folder. Creating page: {page_title!r}")
 
     page_tree_id = _insert_page(nbid, folder_tree_id, page_title)
@@ -390,5 +403,5 @@ def upload_report(out_dir: Path, page_title: str) -> str:
     print("[upload] Attaching raw .md file…")
     _add_attachment(nbid, page_tree_id, report_path)
 
-    print(f"[upload] Done — report uploaded to LabArchives / AI Agent / {page_title!r}")
+    print(f"[upload] Done — report uploaded to LabArchives / {_upload_folder_name()} / {page_title!r}")
     return page_tree_id

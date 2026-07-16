@@ -127,7 +127,7 @@ If the user says **yes** and provides a date/window:
 cd $PROJECT_ROOT
 python -c "
 from datetime import datetime
-from lab_agent.dr_conditions import get_dr_conditions
+from lab_agent.dr import get_dr_conditions
 md = get_dr_conditions('DR_DATA_PATH_FROM_ENV', datetime(YYYY, MM, DD), window_hours=12)
 print(md if md else 'NO_DATA')
 "
@@ -138,7 +138,7 @@ print(md if md else 'NO_DATA')
 cd $PROJECT_ROOT
 python -c "
 from datetime import datetime
-from lab_agent.dr_conditions import get_dr_conditions
+from lab_agent.dr import get_dr_conditions
 md = get_dr_conditions(
     'DR_DATA_PATH_FROM_ENV',
     datetime(YYYY, MM, DD),
