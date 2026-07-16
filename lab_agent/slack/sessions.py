@@ -413,6 +413,14 @@ def _launch(
             return
         _seen_timestamps.add(current_ts)
 
+        # A session for this same thread is still running — stay silent. The
+        # running session polls the thread for replies (that is how the DR
+        # answer arrives mid-pipeline), so a notice here would just be noise.
+        if any(s.get("thread_key") == thread_key for s in _active_sessions):
+            print(f"[session-skip] Thread {thread_key} already has an active session; "
+                  "the reply will be picked up by the running session.", flush=True)
+            return
+
         # Global cap
         active_count = len(_active_sessions)
         if active_count >= MAX_CONCURRENT:
