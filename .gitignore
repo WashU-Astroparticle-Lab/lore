@@ -48,3 +48,6 @@ build/
 # part of the pipeline and ARE committed (.claude/agents/).
 .claude/*
 !.claude/agents/
+
+# Local caches (page index, wiring diagram, org repos)
+cache/

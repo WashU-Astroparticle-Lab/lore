@@ -15,7 +15,9 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 
+from ...config import lab_config_value
 from ...models import CollectedArtifact
+from . import page_index
 from .auth import DEFAULT_BASE_URL, is_base64, sign_request
 from .images import (
     CT_TO_EXT,
@@ -381,11 +383,16 @@ class LabArchivesAdapter(ImageDownloadMixin):
         nbid: str | None = None
         probe_xml: str | None = None  # set by b64 branch to avoid a second fetch
 
-        # Determine which notebooks to search.
+        # Determine which notebooks to search. Most pages live in the lab's
+        # primary notebook (lab_config.md), so search it first — stable sort
+        # keeps the original order for the rest.
         if self._known_nbid:
             notebooks = [{"nbid": self._known_nbid, "name": ""}]
         else:
             notebooks = self._list_notebooks()
+            primary = lab_config_value("Primary notebook").strip().lower()
+            if primary:
+                notebooks.sort(key=lambda nb: 0 if nb["name"].strip().lower() == primary else 1)
 
         if self._b64_tree_id:
             # Raw base64 tree_id passed directly — try it as page_tree_id.
@@ -409,6 +416,21 @@ class LabArchivesAdapter(ImageDownloadMixin):
                 self._page_title = display_title
                 print(f"[LabArchives] Resolved b64 tree_id to display title: {display_title!r}")
         elif self._page_title:
+            # Fast path: consult the persistent page index first. A hit is
+            # validated by actually fetching the page, so a stale entry
+            # (moved/renamed page) just falls through to the full traversal.
+            cached = page_index.lookup(self._page_title)
+            if cached:
+                cached_nbid, cached_tid = cached
+                try:
+                    probe_xml = self._get_entries_for_page(cached_nbid, cached_tid)
+                    nbid, page_tree_id = cached_nbid, cached_tid
+                    print(f"[LabArchives] Page index hit for {self._page_title!r}")
+                except RuntimeError:
+                    print(f"[LabArchives] Page index entry for {self._page_title!r} "
+                          "is stale — re-searching…")
+
+        if page_tree_id is None and self._page_title and not self._b64_tree_id:
             # Page title: search notebooks by display-text.
             print(f"[LabArchives] Searching for page titled {self._page_title!r}…")
             all_pages: list[tuple[str, str, str]] = []  # (display, nbid, b64_tid)
@@ -418,6 +440,10 @@ class LabArchivesAdapter(ImageDownloadMixin):
                     page_tree_id = found
                     nbid = nb["nbid"]
                     break
+
+            # Every page seen during the traversal goes into the index so
+            # later runs resolve titles without walking the tree again.
+            page_index.record_pages(all_pages)
 
             if page_tree_id is None or nbid is None:
                 # Fallback: if the title starts with an 8-digit date and exactly one page
@@ -449,7 +475,7 @@ class LabArchivesAdapter(ImageDownloadMixin):
                     "Check the exact page title in LabArchives (case-insensitive match)."
                     + hint
                 )
-        else:
+        if page_tree_id is None and self._numeric_tree_id and not self._page_title:
             # Numeric ID: search notebooks by tree traversal.
             for nb in notebooks:
                 found = self._find_page_tree_id(nb["nbid"], self._numeric_tree_id)
