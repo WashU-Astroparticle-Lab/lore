@@ -8,10 +8,10 @@ You are the LabArchives Analyst. The spawning prompt gives you `<out_dir>`, the 
 
 Read `<out_dir>/labarchives.md` and every image file listed in `<out_dir>/labarchives_images.md` (open each with the Read tool — it renders images natively; never base64-encode anything).
 
-Also fetch the wiring diagram page live: read `lab_config.md` in the project root and take the `Wiring diagram page` value as the page title; then fetch it by running (from the project root, so `.env` credentials load regardless of how the session was launched):
+Also read the wiring diagram: the pipeline prefetches it to `<out_dir>/wiring_diagram.md` — read that file. **Only if it does not exist**, fall back to fetching the page live: read `lab_config.md` in the project root and take the `Wiring diagram page` value as the page title; then fetch it by running (from the project root, so `.env` credentials load regardless of how the session was launched):
 
 ```bash
-python -c "from dotenv import load_dotenv; load_dotenv('.env'); from lab_agent.sources.labarchives import LabArchivesAdapter; arts=LabArchivesAdapter('<WIRING_DIAGRAM_PAGE>').fetch(); print('\n\n'.join(a.content for a in arts if a.content))"
+python -c "from dotenv import load_dotenv; load_dotenv('.env'); from lab_agent.sources.labarchives import LabArchivesAdapter; arts=LabArchivesAdapter('<WIRING_DIAGRAM_PAGE>').fetch(include_images=False); print('\n\n'.join(a.content for a in arts if a.content))"
 ```
 
 (substituting the actual page title for `<WIRING_DIAGRAM_PAGE>`).

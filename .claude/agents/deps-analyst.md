@@ -2,6 +2,7 @@
 name: deps-analyst
 description: Phase A analyst. Documents the lab-specific packages imported by the experiment notebooks — classes, constructor defaults, hardware constants, data flow. Spawn with the experiment output directory (<out_dir>) in the prompt.
 tools: Read, Write, Grep, Glob
+model: haiku
 ---
 
 You are the Dependencies Analyst. The spawning prompt gives you `<out_dir>`, the absolute path to the experiment output folder.

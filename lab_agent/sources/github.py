@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
+import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 
 from ..collect.discover import build_artifact_group, synthesize_config, infer_title_from_notebook, infer_objective_from_notebook
 from ..collect.ingest import (
@@ -63,10 +66,16 @@ class GitHubAdapter:
     access token via the ``token`` parameter or the ``GITHUB_TOKEN`` env var.
     """
 
+    # Refuse tarballs larger than this and fall back to per-file fetching.
+    _MAX_TARBALL_BYTES = 200 * 1024 * 1024
+
     def __init__(self, url: str, token: str | None = None) -> None:
         self._url = url
         self._token = token or os.environ.get("GITHUB_TOKEN")
         self.owner, self.repo, self.ref, self.folder_path = parse_github_url(url)
+        # {relative_path: bytes} snapshot of the experiment folder, populated by
+        # _load_tarball(). When set, _fetch_bytes serves from it with no HTTP.
+        self._file_cache: dict[str, bytes] | None = None
 
     # ------------------------------------------------------------------
     # Low-level fetch helpers
@@ -84,7 +93,13 @@ class GitHubAdapter:
         return raw.decode("utf-8", errors="replace") if raw is not None else None
 
     def _fetch_bytes(self, relative_path: str) -> bytes | None:
-        """Fetch a file's raw bytes.  Returns None on 404."""
+        """Fetch a file's raw bytes.  Returns None on 404.
+
+        Serves from the tarball snapshot when one was loaded — the tarball is a
+        complete snapshot of the ref, so a cache miss is equivalent to a 404.
+        """
+        if self._file_cache is not None:
+            return self._file_cache.get(relative_path)
         req = urllib.request.Request(self._raw_url(relative_path))
         if self._token:
             req.add_header("Authorization", f"token {self._token}")
@@ -96,6 +111,56 @@ class GitHubAdapter:
             if exc.code == 404:
                 return None
             raise
+
+    def _load_tarball(self) -> bool:
+        """Download the repo tarball once and index the experiment folder's files.
+
+        One HTTP request replaces a request per file. Returns True on success;
+        on any failure (network, size cap, parse) leaves the cache unset so
+        _fetch_bytes falls back to per-file fetching.
+        """
+        url = f"https://api.github.com/repos/{self.owner}/{self.repo}/tarball/{self.ref}"
+        req = urllib.request.Request(url)
+        if self._token:
+            req.add_header("Authorization", f"token {self._token}")
+        req.add_header("User-Agent", "lab-agent/1.0")
+        try:
+            chunks: list[bytes] = []
+            size = 0
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    size += len(chunk)
+                    if size > self._MAX_TARBALL_BYTES:
+                        print(f"[GitHub] Tarball exceeds {self._MAX_TARBALL_BYTES // 2**20} MB; "
+                              "falling back to per-file downloads.")
+                        return False
+                    chunks.append(chunk)
+            data = b"".join(chunks)
+
+            files: dict[str, bytes] = {}
+            prefix = self.folder_path + "/" if self.folder_path else ""
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tf:
+                for member in tf.getmembers():
+                    if not member.isfile():
+                        continue
+                    # Tarball paths start with "<owner>-<repo>-<sha>/"
+                    rel = member.name.split("/", 1)[1] if "/" in member.name else member.name
+                    if prefix:
+                        if not rel.startswith(prefix):
+                            continue
+                        rel = rel[len(prefix):]
+                    handle = tf.extractfile(member)
+                    if handle is not None:
+                        files[rel] = handle.read()
+            self._file_cache = files
+            print(f"[GitHub] Tarball snapshot loaded: {len(files)} file(s), {size // 1024} KB")
+            return True
+        except Exception as exc:
+            print(f"[GitHub] Tarball fetch failed ({exc}); falling back to per-file downloads.")
+            return False
 
     def _fetch_api(self, api_path: str) -> object:
         """Fetch from the GitHub API and return the parsed JSON object."""
@@ -233,8 +298,13 @@ class GitHubAdapter:
         # Step 3 — provisional config for iter_all_artifacts
         provisional_config = synthesize_config(folder_name, artifact_group)
 
-        # Step 4 — collect all artifact content
-        collected = [self._collect(art) for art in iter_all_artifacts(provisional_config)]
+        # Step 4 — collect all artifact content. Prefer one tarball request for
+        # the whole folder; if that fails, fetch per-file concurrently.
+        # pool.map preserves artifact order either way.
+        self._load_tarball()
+        artifacts = list(iter_all_artifacts(provisional_config))
+        with ThreadPoolExecutor(max_workers=min(8, max(1, len(artifacts)))) as pool:
+            collected = list(pool.map(self._collect, artifacts))
 
         # Step 5 — re-rank primary notebook by code cell count
         def _code_cells(path: str) -> int:

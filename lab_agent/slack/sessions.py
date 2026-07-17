@@ -5,7 +5,9 @@ session's final output back to Slack.
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import subprocess
 import textwrap
 import threading
@@ -26,6 +28,73 @@ SESSION_TIMEOUT = 40 * 60  # Kill sessions still running after 40 minutes
 _active_sessions: list[dict] = []
 _seen_timestamps: set[str] = set()   # dedup: one session per Slack message ts
 _sessions_lock   = threading.Lock()
+
+
+# ── Claude session persistence (thread_ts → Claude Code session UUID) ─────────
+#
+# Each Slack thread maps to one long-lived Claude Code session. The first
+# message in a thread spawns `claude --session-id <uuid>`; every later reply
+# spawns `claude --resume <uuid>`, which restores the full prior conversation
+# (tool calls, pipeline stage, outputs already read) instead of cold-starting
+# a fresh session that must re-derive everything from thread history.
+
+SESSION_MAP_PATH = PROJECT_ROOT / "session_logs" / "session_map.json"
+SESSION_MAP_MAX = 200
+_session_map_lock = threading.Lock()
+
+
+def _load_session_map() -> dict:
+    try:
+        return json.loads(SESSION_MAP_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_session_map(session_map: dict) -> None:
+    SESSION_MAP_PATH.parent.mkdir(exist_ok=True)
+    SESSION_MAP_PATH.write_text(
+        json.dumps(session_map, indent=2), encoding="utf-8"
+    )
+
+
+def remember_session(thread_key: str, claude_session_id: str) -> None:
+    with _session_map_lock:
+        session_map = _load_session_map()
+        session_map[thread_key] = {
+            "claude_session_id": claude_session_id,
+            "updated_at": time.time(),
+        }
+        if len(session_map) > SESSION_MAP_MAX:
+            oldest = sorted(session_map, key=lambda k: session_map[k].get("updated_at", 0))
+            for k in oldest[: len(session_map) - SESSION_MAP_MAX]:
+                session_map.pop(k, None)
+        _save_session_map(session_map)
+
+
+def forget_session(thread_key: str) -> None:
+    with _session_map_lock:
+        session_map = _load_session_map()
+        if session_map.pop(thread_key, None) is not None:
+            _save_session_map(session_map)
+
+
+def _transcript_path(claude_session_id: str) -> Path:
+    # Claude Code stores transcripts under ~/.claude/projects/<munged-cwd>/,
+    # where the cwd is munged by replacing "/" and "." with "-".
+    munged = re.sub(r"[/.]", "-", str(PROJECT_ROOT))
+    return Path.home() / ".claude" / "projects" / munged / f"{claude_session_id}.jsonl"
+
+
+def resumable_session(thread_key: str) -> str | None:
+    """Return the stored Claude session ID if its transcript still exists."""
+    with _session_map_lock:
+        entry = _load_session_map().get(thread_key)
+    if not entry:
+        return None
+    sid = entry.get("claude_session_id", "")
+    if sid and _transcript_path(sid).exists():
+        return sid
+    return None
 
 
 def _reap_nolock() -> None:
@@ -61,9 +130,18 @@ def _reap_nolock() -> None:
                         api.post_message(s["channel"], s["thread_ts"], body)
             elif not s.get("timed_out"):
                 tail = read_log_tail(log_path) if log_path else ""
+                resume_error_keywords = ("no conversation found", "session not found",
+                                         "unknown session", "could not resume")
                 limit_keywords = ("hit your limit", "rate limit", "usage limit",
                                   "too many requests", "overloaded")
-                if any(k in tail.lower() for k in limit_keywords):
+                if s.get("resume_of") and any(k in tail.lower() for k in resume_error_keywords):
+                    # The stored Claude session is gone — drop the mapping so the
+                    # next message in this thread starts a fresh session.
+                    forget_session(s["thread_key"])
+                    msg = (f"<@{s['user']}> I lost the saved context for this thread "
+                           "(the session expired). Please resend your last message and "
+                           "I'll pick it up fresh.")
+                elif any(k in tail.lower() for k in limit_keywords):
                     msg = (f"<@{s['user']}> I hit the daily token limit mid-pipeline and stopped. "
                            "The report is incomplete — try again after your limit resets.")
                 else:
@@ -150,17 +228,50 @@ def spawn_claude(
         # Reply within an existing thread → continue in that thread.
         # History is scoped to this thread only; top-level messages start fresh.
         reply_ts: str | None = thread_ts if thread_ts else current_ts
-        history_str = fetch_history(channel, thread_ts, current_ts)
         history_label = "Thread conversation history (oldest first; new conversation if empty)"
-        reply_to_str = f"channel={channel}, thread_ts={reply_ts}"
-        post_data_py: dict = {"channel": channel, "thread_ts": reply_ts, "text": "<message>"}
     else:
         # Channel mentions: thread-based. Full thread fetched via conversations.replies.
         reply_ts = thread_ts or current_ts
-        history_str  = fetch_history(channel, thread_ts, current_ts)
         history_label = "Conversation history — full thread, oldest first"
-        reply_to_str = f"channel={channel}, thread_ts={reply_ts}"
-        post_data_py: dict = {"channel": channel, "thread_ts": reply_ts, "text": "<message>"}
+
+    reply_to_str = f"channel={channel}, thread_ts={reply_ts}"
+    post_data_py: dict = {"channel": channel, "thread_ts": reply_ts, "text": "<message>"}
+
+    # Resume the thread's existing Claude session when its transcript survives;
+    # a resumed session already holds the full conversation and pipeline state,
+    # so it gets a short continuation prompt instead of the cold-start prompt.
+    thread_key = str(reply_ts)
+    resume_id = resumable_session(thread_key)
+
+    if resume_id:
+        prompt = textwrap.dedent(f"""
+            (Resumed Slack session — you already have the full context of this conversation
+            and any pipeline work you completed earlier. Trust it; do not re-derive state.)
+
+            Latest message from <@{user}>: {text}
+            Reply-to      : {reply_to_str}
+
+            Continue from wherever you left off. Never repeat completed steps — if run.py
+            outputs or extracted_*.md files already exist, do not regenerate them.
+
+            Delivery rules (unchanged): your final text output is delivered to Slack
+            automatically after you exit — do NOT post the final reply yourself. Post
+            mid-pipeline progress updates via Python chat.postMessage as before:
+              python -c "
+import json, urllib.request
+from dotenv import dotenv_values
+token = dotenv_values('{PROJECT_ROOT}/.env')['SLACK_BOT_TOKEN']
+data = json.dumps({post_data_py}).encode()
+req = urllib.request.Request('https://slack.com/api/chat.postMessage', data=data, method='POST')
+req.add_header('Authorization', f'Bearer {{token}}')
+req.add_header('Content-Type', 'application/json')
+urllib.request.urlopen(req, timeout=10)
+"
+        """).strip()
+        return _launch(user, channel, reply_ts, current_ts, prompt, resume_id=resume_id,
+                       thread_key=thread_key)
+
+    history_str = fetch_history(channel, thread_ts, current_ts)
 
     prompt = textwrap.dedent(f"""
         You are LORE, the AI assistant for a physics research lab (superconducting qubits and KIDs).
@@ -224,11 +335,11 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
         Each Slack reply spawns a fresh session. Read the conversation history carefully to
         determine what stage the pipeline is at before doing anything:
 
-        - If history shows "Data fetched" and then the bot asked about DR conditions,
-          and the latest message is the user's answer (yes/no): this session's job is ONLY
-          to handle the DR question and continue from there. Do NOT re-check credentials or
-          re-run run.py. The output files already exist in outputs/ — read them and write
-          the report (or fetch DR data first if the user said yes).
+        - If history shows the bot asked about DR conditions and the latest message is the
+          user's answer (yes with a date/window, or no): the fetch and Phase A analysis are
+          already done. Do NOT re-check credentials, re-run run.py, or re-run Phase A. The
+          outputs/<experiment_id>/ files (including extracted_*.md) already exist — resolve
+          the DR answer per CLAUDE.md Step 2b and continue from Phase B.
 
         - If history shows the report was already uploaded, and the user is asking to redo it:
           check whether outputs/<experiment_id>/ already has the data files (labarchives.md,
@@ -240,32 +351,53 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
 
         Pipeline steps and Slack progress updates (only for a fresh pipeline run):
 
-          1. Before checking .env:
-             Post: "Checking credentials..."
-          2. Before running run.py:
-             Post: "Fetching GitHub and LabArchives data..."
-          3. If run.py reports expired cookies, run `python get_la_cookies.py` immediately
+          1. FIRST, before anything else (unless the user's request already answered it):
+             Post the DR question via Python and continue immediately — do NOT wait:
+               "While I fetch the data — would you like dilution refrigerator conditions
+               included in this report? If yes, reply with the date and time window of your
+               measurement (e.g. 'Feb 18 2025' or 'Feb 18 2025, 14:00–22:00'). If not,
+               just say 'no'."
+          2. Post: "Checking credentials..." then check .env.
+          3. Post: "Fetching GitHub and LabArchives data..." then run run.py.
+             If run.py reports expired cookies, run `python get_la_cookies.py` immediately
              (never ask the user), then post: "Session cookies refreshed, retrying fetch..."
              and rerun run.py.
-          4. After run.py completes (IMPORTANT — DR conditions pause):
-             Write ONLY this as your final text output and exit immediately. Do not post
-             anything via Python. Do not add any other text before or after.
-               "Pipeline finished. Would you like to include dilution refrigerator conditions
-               in this report? If yes, please give me the date and time window of your
-               measurement (e.g. 'Feb 18 2025' or 'Feb 18 2025, 14:00–22:00')."
-             The system delivers this to the user. The next session reads their reply and
-             continues. Do NOT write "I've posted..." or any other meta-commentary.
-          5. (Next session, after user answers DR question) Before running Phase A:
-             Post: "Writing report..."
-          6. After saving the report file:
+          4. Immediately after run.py completes: post "Data fetched — analyzing..." and
+             spawn the Phase A analysts (CLAUDE.md Step 3) WITHOUT waiting for the DR answer.
+          5. When Phase A finishes, check the thread for the user's DR answer
+             (conversations.replies via Python, using the Reply-to coordinates above):
+             - yes + date/window → fetch DR data and run dr-analyst (CLAUDE.md Step 2b)
+             - no → continue
+             - no answer yet → write the Step 2b reminder as your final text output and
+               exit; the next session continues from Phase B.
+          6. Post: "Writing report..." then run Phases B, C, D per CLAUDE.md.
+          7. After saving the report file:
              Post: "Report written. Uploading to LabArchives..."
-          7. After upload completes, write your final summary as normal text output
+          8. After upload completes, write your final summary as normal text output
              (do NOT post it yourself — the system delivers your final output automatically).
              Include: what experiment was reported, key findings (2-3 bullets), confirmation
              it's live in LabArchives under the upload folder, tagging <@{user}>.
 
         Project root: {PROJECT_ROOT}
     """).strip()
+
+    _launch(user, channel, reply_ts, current_ts, prompt, resume_id=None,
+            thread_key=thread_key, session_id=session_id)
+
+
+def _launch(
+    user: str,
+    channel: str,
+    reply_ts: str | None,
+    current_ts: str,
+    prompt: str,
+    *,
+    resume_id: str | None,
+    thread_key: str,
+    session_id: str | None = None,
+) -> None:
+    """Reserve a session slot and spawn the claude process (fresh or resumed)."""
+    session_id = session_id or uuid.uuid4().hex[:8]
 
     # ── Atomic dedup + cap check ─────────────────────────────────────────────
     # Holding the lock for the entire check-and-reserve block prevents two
@@ -280,6 +412,14 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
             print(f"[dedup] Dropped duplicate event ts={current_ts} user={user}", flush=True)
             return
         _seen_timestamps.add(current_ts)
+
+        # A session for this same thread is still running — stay silent. The
+        # running session polls the thread for replies (that is how the DR
+        # answer arrives mid-pipeline), so a notice here would just be noise.
+        if any(s.get("thread_key") == thread_key for s in _active_sessions):
+            print(f"[session-skip] Thread {thread_key} already has an active session; "
+                  "the reply will be picked up by the running session.", flush=True)
+            return
 
         # Global cap
         active_count = len(_active_sessions)
@@ -309,6 +449,8 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
             "session_log": None,
             "prompt_file": None,
             "timed_out":  False,
+            "thread_key": thread_key,
+            "resume_of":  resume_id,
         }
         _active_sessions.append(slot)
 
@@ -331,10 +473,21 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
     for _var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         child_env.pop(_var, None)
 
+    # Resume the thread's prior Claude session if we have one; otherwise mint a
+    # session UUID ourselves so later replies in this thread can resume it.
+    if resume_id:
+        claude_session_id = resume_id
+        session_flags = f"--resume {claude_session_id}"
+    else:
+        claude_session_id = str(uuid.uuid4())
+        session_flags = f"--session-id {claude_session_id}"
+
     with open(session_log, "w") as log:
-        log.write(f"=== Session {session_id}: user={user} channel={channel} ===\n")
+        log.write(f"=== Session {session_id}: user={user} channel={channel} "
+                  f"claude_session={claude_session_id} resumed={bool(resume_id)} ===\n")
         proc = subprocess.Popen(
-            f'claude --dangerously-skip-permissions --output-format text --model claude-sonnet-4-6 < "{prompt_file}"',
+            f'claude --dangerously-skip-permissions --output-format text '
+            f'--model claude-sonnet-4-6 {session_flags} < "{prompt_file}"',
             shell=True,
             cwd=str(PROJECT_ROOT),
             stdout=log,
@@ -342,10 +495,12 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
             env=child_env,
         )
 
+    remember_session(thread_key, claude_session_id)
+
     # Fill in the slot now that we have the real proc
     slot["proc"]        = proc
     slot["session_log"] = session_log
     slot["prompt_file"] = prompt_file
 
     print(f"[session-start] user={user} session={session_id} pid={proc.pid} "
-          f"active={len(_active_sessions)}", flush=True)
+          f"resumed={bool(resume_id)} active={len(_active_sessions)}", flush=True)

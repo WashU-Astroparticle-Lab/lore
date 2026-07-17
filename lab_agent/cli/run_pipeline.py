@@ -27,15 +27,19 @@ Output folder: outputs/<experiment_id>/
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from ..config import OUTPUT_ROOT, load_env
+import time
+
+from ..config import OUTPUT_ROOT, PROJECT_ROOT, lab_config_value, load_env
 
 load_env()
 
-from ..collect.dependencies import resolve_dependencies
+from ..collect.dependencies import build_dependencies_md
 from ..collect.summarize import summarize_bundle
 from ..models import (
     ArtifactGroup, CollectedArtifact, ExperimentBundle,
@@ -43,6 +47,7 @@ from ..models import (
 )
 from ..sources import GitHubAdapter, LabArchivesAdapter
 from ..sources.github import parse_github_url
+from ..sources.labarchives.auth import cookies_still_valid
 
 _ID_STOPWORDS = {"and", "or", "the", "a", "an", "in", "to", "of", "for", "with",
                  "new", "at", "by", "on", "its", "is", "was", "are"}
@@ -103,14 +108,73 @@ def _find_github_urls(artifacts: list[CollectedArtifact]) -> list[str]:
     return urls
 
 
+_WIRING_CACHE = PROJECT_ROOT / "cache" / "wiring_diagram.md"
+_WIRING_TTL_SECONDS = 7 * 24 * 3600
+
+
+def _fetch_wiring_diagram() -> str | None:
+    """Return the wiring diagram page as Markdown, from cache when fresh.
+
+    The labarchives-analyst agent needs this page every run; prefetching it
+    here (text only, concurrently with the page fetches) saves the agent a
+    live LabArchives search at report time. The diagram rarely changes, so a
+    7-day disk cache skips even that.
+    """
+    title = lab_config_value("Wiring diagram page").strip()
+    if not title:
+        return None
+    if _WIRING_CACHE.exists() and time.time() - _WIRING_CACHE.stat().st_mtime < _WIRING_TTL_SECONDS:
+        print("[runner] Wiring diagram served from cache.")
+        return _WIRING_CACHE.read_text(encoding="utf-8")
+    try:
+        arts = LabArchivesAdapter(title).fetch(include_images=False)
+    except Exception as exc:
+        print(f"[runner] Warning: wiring diagram fetch failed ({exc}); "
+              "the labarchives-analyst will fetch it live instead.")
+        return None
+    text = "\n\n".join(a.content for a in arts if a.content)
+    if not text:
+        return None
+    md = f"# Wiring Diagram — {title}\n\n{text}"
+    try:
+        _WIRING_CACHE.parent.mkdir(exist_ok=True)
+        _WIRING_CACHE.write_text(md, encoding="utf-8")
+    except OSError as exc:
+        print(f"[runner] Warning: could not cache wiring diagram: {exc}")
+    return md
+
+
 def run(github_url: str | None, la_pages: list[str]) -> str:
+    # 0. Fail fast on an expired web session BEFORE any fetching. Previously an
+    # expired cookie only surfaced after the full text+image fetch, forcing a
+    # complete rerun. One probe request catches it in seconds instead.
+    cookie_str = os.environ.get("LA_SESSION_COOKIE", "").strip()
+    if la_pages and cookie_str and not cookies_still_valid(cookie_str):
+        print(
+            "[runner] COOKIE_REFRESH_NEEDED: LA_SESSION_COOKIE is expired "
+            "(detected by pre-fetch probe, nothing was fetched).\n"
+            "Run:  python get_la_cookies.py\n"
+            "Then rerun this command."
+        )
+        sys.exit(3)
+
     la_artifacts: list[CollectedArtifact] = []
 
-    # 1. Fetch LabArchives pages first — they may contain GitHub URLs
+    # Kick off the wiring diagram prefetch in the background; the result is
+    # collected right before files are written.
+    wiring_pool = ThreadPoolExecutor(max_workers=1)
+    wiring_future = wiring_pool.submit(_fetch_wiring_diagram)
+    wiring_pool.shutdown(wait=False)
+
+    # 1. Fetch LabArchives pages first — they may contain GitHub URLs.
+    # Pages are independent, so fetch them concurrently; pool.map preserves
+    # input order so the assembled artifacts match the sequential layout.
     if la_pages:
         for page in la_pages:
             print(f"[runner] Fetching LabArchives: {page!r}")
-            la_artifacts.extend(LabArchivesAdapter(page).fetch())
+        with ThreadPoolExecutor(max_workers=min(4, len(la_pages))) as pool:
+            for arts in pool.map(lambda p: LabArchivesAdapter(p).fetch(), la_pages):
+                la_artifacts.extend(arts)
 
     # If no GitHub URL was given, look for one embedded in the LabArchives content
     discovered_urls: list[str] = []
@@ -170,6 +234,15 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
             collected_artifacts=la_artifacts,
         )
 
+    # Kick off dependency resolution in the background (network-bound) so it
+    # overlaps with summarization and file writing; joined at step 8.
+    deps_future = None
+    if github_url:
+        owner, _, _, _ = parse_github_url(github_url)
+        deps_pool = ThreadPoolExecutor(max_workers=1)
+        deps_future = deps_pool.submit(build_dependencies_md, bundle.collected_artifacts, owner)
+        deps_pool.shutdown(wait=False)
+
     # 3. Extract structured content
     summary = summarize_bundle(bundle)
     out_dir = Path(OUTPUT_ROOT) / summary.output_dirname
@@ -207,6 +280,12 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
         )
         print(f"[runner] Saved labarchives_images.md")
 
+    # 5c. Save the prefetched wiring diagram for the labarchives-analyst
+    wiring_md = wiring_future.result()
+    if wiring_md:
+        (out_dir / "wiring_diagram.md").write_text(wiring_md, encoding="utf-8")
+        print(f"[runner] Saved wiring_diagram.md")
+
     # 6. Save GitHub image files
     gh_images = [
         art for art in bundle.collected_artifacts
@@ -237,10 +316,12 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
         (out_dir / "data_summaries.md").write_text("\n\n".join(data_parts), encoding="utf-8")
         print(f"[runner] Saved data_summaries.md")
 
-    # 8. Resolve lab-specific imports (only if GitHub is available)
-    if github_url:
-        owner, _, _, _ = parse_github_url(github_url)
-        resolve_dependencies(out_dir, bundle.collected_artifacts, owner)
+    # 8. Save lab-specific import sources (resolution started before step 3)
+    if deps_future is not None:
+        deps_md = deps_future.result()
+        if deps_md:
+            (out_dir / "dependencies.md").write_text(deps_md, encoding="utf-8")
+            print(f"[deps] Saved dependencies.md ({len(deps_md):,} chars)")
 
     # 9. Write metadata for downstream phase scripts
     metadata = {

@@ -12,9 +12,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from html.parser import HTMLParser
 
+from ...config import lab_config_value
 from ...models import CollectedArtifact
+from . import page_index
 from .auth import DEFAULT_BASE_URL, is_base64, sign_request
 from .images import (
     CT_TO_EXT,
@@ -373,18 +376,27 @@ class LabArchivesAdapter(ImageDownloadMixin):
     # Public interface
     # ------------------------------------------------------------------
 
-    def fetch(self) -> list[CollectedArtifact]:
-        """Fetch the LabArchives page and return its entries as CollectedArtifacts."""
+    def fetch(self, include_images: bool = True) -> list[CollectedArtifact]:
+        """Fetch the LabArchives page and return its entries as CollectedArtifacts.
+
+        With ``include_images=False`` only text entries are returned — no image
+        downloads and no session-cookie requirement.
+        """
         # Step 1: resolve page tree_id and notebook ID.
         page_tree_id: str | None = None
         nbid: str | None = None
         probe_xml: str | None = None  # set by b64 branch to avoid a second fetch
 
-        # Determine which notebooks to search.
+        # Determine which notebooks to search. Most pages live in the lab's
+        # primary notebook (lab_config.md), so search it first — stable sort
+        # keeps the original order for the rest.
         if self._known_nbid:
             notebooks = [{"nbid": self._known_nbid, "name": ""}]
         else:
             notebooks = self._list_notebooks()
+            primary = lab_config_value("Primary notebook").strip().lower()
+            if primary:
+                notebooks.sort(key=lambda nb: 0 if nb["name"].strip().lower() == primary else 1)
 
         if self._b64_tree_id:
             # Raw base64 tree_id passed directly — try it as page_tree_id.
@@ -408,6 +420,21 @@ class LabArchivesAdapter(ImageDownloadMixin):
                 self._page_title = display_title
                 print(f"[LabArchives] Resolved b64 tree_id to display title: {display_title!r}")
         elif self._page_title:
+            # Fast path: consult the persistent page index first. A hit is
+            # validated by actually fetching the page, so a stale entry
+            # (moved/renamed page) just falls through to the full traversal.
+            cached = page_index.lookup(self._page_title)
+            if cached:
+                cached_nbid, cached_tid = cached
+                try:
+                    probe_xml = self._get_entries_for_page(cached_nbid, cached_tid)
+                    nbid, page_tree_id = cached_nbid, cached_tid
+                    print(f"[LabArchives] Page index hit for {self._page_title!r}")
+                except RuntimeError:
+                    print(f"[LabArchives] Page index entry for {self._page_title!r} "
+                          "is stale — re-searching…")
+
+        if page_tree_id is None and self._page_title and not self._b64_tree_id:
             # Page title: search notebooks by display-text.
             print(f"[LabArchives] Searching for page titled {self._page_title!r}…")
             all_pages: list[tuple[str, str, str]] = []  # (display, nbid, b64_tid)
@@ -417,6 +444,10 @@ class LabArchivesAdapter(ImageDownloadMixin):
                     page_tree_id = found
                     nbid = nb["nbid"]
                     break
+
+            # Every page seen during the traversal goes into the index so
+            # later runs resolve titles without walking the tree again.
+            page_index.record_pages(all_pages)
 
             if page_tree_id is None or nbid is None:
                 # Fallback: if the title starts with an 8-digit date and exactly one page
@@ -448,7 +479,7 @@ class LabArchivesAdapter(ImageDownloadMixin):
                     "Check the exact page title in LabArchives (case-insensitive match)."
                     + hint
                 )
-        else:
+        if page_tree_id is None and self._numeric_tree_id and not self._page_title:
             # Numeric ID: search notebooks by tree traversal.
             for nb in notebooks:
                 found = self._find_page_tree_id(nb["nbid"], self._numeric_tree_id)
@@ -496,48 +527,76 @@ class LabArchivesAdapter(ImageDownloadMixin):
                 for i, (label, content) in enumerate(entries)
             ]
 
+        if not include_images:
+            return text_artifacts
+
         # Slugify the ref for use in filenames (avoids collisions across pages)
         safe_ref = re.sub(r"[^\w]", "_", str(ref))[:40].strip("_")
 
-        # Build image artifacts — attachment entries first
-        image_artifacts: list[CollectedArtifact] = []
-        for filename, download_url, caption in parse_image_entries(xml_text):
+        # Build image artifacts — downloads are independent, so run them
+        # concurrently; pool.map preserves entry order so artifact ordering
+        # (and hence manifest/report ordering) matches the sequential layout.
+        attachment_entries = parse_image_entries(xml_text)
+        embedded_urls = list(enumerate(extract_embedded_img_urls(xml_text), start=1))
+
+        def _fetch_attachment(item: tuple[str, str, str]) -> CollectedArtifact | None:
+            filename, download_url, caption = item
             print(f"[LabArchives] Downloading attachment image: {filename}")
             try:
                 raw = self._download_bytes(download_url)
-                image_artifacts.append(CollectedArtifact(
+                return CollectedArtifact(
                     path=f"labarchives://{ref}/{filename}",
                     kind="figure",
                     description=f"LabArchives image: {caption}",
                     exists=True,
                     raw_bytes=raw,
                     source="labarchives",
-                ))
+                )
             except RuntimeError as exc:
                 print(f"[LabArchives] Warning: skipping attachment {filename} — {exc}")
+                return None
 
-        # Embedded <img> images inside rich-text entry HTML
-        cookie_errors: list[str] = []
-        for i, img_url in enumerate(extract_embedded_img_urls(xml_text), start=1):
+        def _fetch_embedded(item: tuple[int, str]) -> CollectedArtifact | str | None:
+            """Return an artifact, a cookie-error message (str), or None (skipped)."""
+            i, img_url = item
             print(f"[LabArchives] Downloading embedded image {i}: {img_url[:70]}…")
             try:
                 raw, content_type = self._download_image(img_url)
                 ext = CT_TO_EXT.get(content_type, ".png")
                 filename = f"{safe_ref}_img_{i}{ext}"
-                image_artifacts.append(CollectedArtifact(
+                return CollectedArtifact(
                     path=f"labarchives://{ref}/{filename}",
                     kind="figure",
                     description=f"LabArchives embedded image {i} (from page: {ref})",
                     exists=True,
                     raw_bytes=raw,
                     source="labarchives",
-                ))
+                )
             except RuntimeError as exc:
                 msg = str(exc)
                 if "expired" in msg.lower() or "LA_SESSION_COOKIE" in msg or "get_la_cookies" in msg:
-                    cookie_errors.append(msg)
-                else:
-                    print(f"[LabArchives] Warning: skipping embedded image {i} — {exc}")
+                    return msg
+                print(f"[LabArchives] Warning: skipping embedded image {i} — {exc}")
+                return None
+
+        # Resolve session cookies once up front — _download_image lazily resolves
+        # them on first need, and doing that inside the pool would race.
+        if embedded_urls:
+            self._ensure_session_cookies()
+
+        image_artifacts: list[CollectedArtifact] = []
+        cookie_errors: list[str] = []
+        n_downloads = len(attachment_entries) + len(embedded_urls)
+        if n_downloads:
+            with ThreadPoolExecutor(max_workers=min(8, n_downloads)) as pool:
+                attachment_results = pool.map(_fetch_attachment, attachment_entries)
+                embedded_results = pool.map(_fetch_embedded, embedded_urls)
+                image_artifacts.extend(a for a in attachment_results if a is not None)
+                for result in embedded_results:
+                    if isinstance(result, str):
+                        cookie_errors.append(result)
+                    elif result is not None:
+                        image_artifacts.append(result)
 
         if cookie_errors:
             raise RuntimeError(
