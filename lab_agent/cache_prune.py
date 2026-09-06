@@ -52,12 +52,20 @@ def plan_prune(
     """
     if not root.exists():
         return []
+    from .retention import in_active_use
+
     entries = _entries_newest_first(root)
     cutoff = time.time() - max_age_days * 86400
     doomed: list[tuple[Path, int, str]] = []
 
     keep = []
     for path, mtime, size in entries:
+        # A page whose figures are under discussion must stay, however old the
+        # files are — re-fetching mid-conversation needs a live cookie and costs
+        # the user a Duo tap.
+        if path.is_dir() and in_active_use(path):
+            keep.append((path, time.time(), size))
+            continue
         if mtime < cutoff:
             doomed.append((path, size, f"older than {max_age_days}d"))
         else:

@@ -13,7 +13,9 @@ Dry run is the default. Every flag above is required to delete anything.
 Policy lives in lab_agent/retention.py. In short: the record (reports,
 extractions, critiques, provenance, metadata, corpus, knowledge bundle) is never
 auto-deleted — it measured 1.0 MB against 242.5 MB of figures. Figures are
-reconstructible and are reclaimed once a run's report is in LabArchives.
+reconstructible and are reclaimed once a run's report is in LabArchives AND the
+run has gone idle: anything read recently is left alone, because re-fetching a
+figure that is under discussion costs a live cookie, a Duo tap and a wait.
 
 This tree usually sits inside OneDrive, which syncs every byte regardless of
 .gitignore, so trimming reduces sync traffic as well as disk.
@@ -25,7 +27,9 @@ from pathlib import Path
 
 from ..cache_prune import DEFAULT_MAX_AGE_DAYS, DEFAULT_MAX_MB, dir_size, plan_prune, prune
 from ..config import KNOWLEDGE_ROOT, PROJECT_ROOT
-from ..retention import LEGACY_MIN_AGE_DAYS, classify_run, duplicate_stats, strip_images
+from ..retention import (
+    LEGACY_MIN_AGE_DAYS, MIN_IDLE_DAYS, classify_run, duplicate_stats, strip_images,
+)
 
 CACHES = [KNOWLEDGE_ROOT / "image_cache"]
 OUTPUTS = PROJECT_ROOT / "outputs"
@@ -55,7 +59,9 @@ def main() -> None:
     freed_total = 0
 
     # ---- experiment runs -------------------------------------------------
-    print("\n=== outputs/ — figures are reclaimable once the report is uploaded ===")
+    print("\n=== outputs/ — figures go once the report is uploaded AND the run is idle ===")
+    print(f"    a run read within {MIN_IDLE_DAYS} days is left alone however old it is: a figure")
+    print("    under discussion must stay on disk so the next question is instant")
     runs = sorted(d for d in OUTPUTS.iterdir() if d.is_dir()) if OUTPUTS.exists() else []
     for run in runs:
         info = classify_run(run, min_age)

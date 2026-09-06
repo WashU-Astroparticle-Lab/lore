@@ -30,6 +30,12 @@ def prepare(path: str, crop: tuple | None = None, scale: float = 2.0,
     """Return (output_path, (w, h)). ``crop`` is a fractional (x0, y0, x1, y1) box."""
     from PIL import Image
 
+    # Zooming a figure is the strongest possible signal that it is under active
+    # discussion, so mark it before anything else — retention must not reclaim a
+    # figure someone is reading right now.
+    from ..retention import touch_used
+    touch_used(path)
+
     im = Image.open(path)
     w, h = im.size
     suffix = "_view"

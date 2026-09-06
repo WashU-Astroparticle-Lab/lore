@@ -43,10 +43,64 @@ from pathlib import Path
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 IMAGE_DIRS = ("github_images", "labarchives_images")
 PRUNE_MANIFEST = "images_pruned.json"
+USED_MARKER = ".lore_last_used"
 
 # A run must be at least this old before its figures can be reclaimed on the
 # inferred (pre-labarchives_upload) path.
 LEGACY_MIN_AGE_DAYS = 30
+
+# Nothing is reclaimed while it is still in use. "Uploaded" says the report is
+# safe; it says nothing about whether someone is mid-conversation about a figure
+# in it. Deleting a figure that is under discussion costs a re-fetch, and for
+# LabArchives that means a live cookie and possibly a Duo tap — precisely the
+# latency the pipeline exists to avoid. Any directory read within this window is
+# off limits.
+MIN_IDLE_DAYS = 7
+
+# File access times are not a usable signal here: Windows very often has NTFS
+# last-access updates disabled for performance, so atime can equal ctime forever.
+# Readers therefore mark use explicitly via touch_used().
+
+
+def touch_used(path) -> None:
+    """Record that this directory's figures were just used. Never raises.
+
+    Called from every path that reads figures — fetching a page's images, zooming
+    a figure, downloading a Slack attachment — so retention can tell "archived"
+    from "actively being discussed".
+    """
+    try:
+        p = Path(path)
+        if p.is_file():
+            p = p.parent
+        if p.is_dir():
+            (p / USED_MARKER).write_text(str(time.time()), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def idle_days(path) -> float:
+    """Days since this directory's figures were last used.
+
+    Falls back to directory mtime when no marker exists (nothing has read it
+    since the feature was added).
+    """
+    p = Path(path)
+    marker = p / USED_MARKER
+    if marker.exists():
+        try:
+            return (time.time() - float(marker.read_text(encoding="utf-8").strip())) / 86400
+        except (OSError, ValueError):
+            pass
+    try:
+        return (time.time() - p.stat().st_mtime) / 86400
+    except OSError:
+        return 0.0
+
+
+def in_active_use(path, min_idle_days: float = MIN_IDLE_DAYS) -> bool:
+    """True if this directory was read recently enough to leave alone."""
+    return idle_days(path) < min_idle_days
 
 
 def _size(paths) -> int:
@@ -82,8 +136,15 @@ def classify_run(run_dir: Path, legacy_min_age_days: int = LEGACY_MIN_AGE_DAYS) 
     age_days = (time.time() - run_dir.stat().st_mtime) / 86400
     already_pruned = (run_dir / PRUNE_MANIFEST).exists()
 
+    idle = idle_days(run_dir)
+
     if already_pruned and not images:
         reason = "already slimmed"
+        reclaimable = False
+    elif in_active_use(run_dir):
+        # Beats every other signal, including "uploaded". A figure someone is
+        # asking about must stay on disk so the next question is instant.
+        reason = f"IN USE — read {idle * 24:.0f}h ago; keeping so follow-ups stay fast"
         reclaimable = False
     elif uploaded:
         reason = "uploaded — LabArchives holds the report"

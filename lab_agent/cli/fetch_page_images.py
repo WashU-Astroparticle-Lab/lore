@@ -62,6 +62,10 @@ def main() -> None:
 
     out = KNOWLEDGE_ROOT / "image_cache" / _safe(rec["page"])
     out.mkdir(parents=True, exist_ok=True)
+    # Mark it in use: a page being fetched is a page being discussed, and the
+    # follow-up question must not pay for a re-fetch.
+    from ..retention import touch_used
+    touch_used(out)
     adapter = LabArchivesAdapter("__fetch__")
     saved: list[str] = []
     for i, url in enumerate(rec["images"], 1):
