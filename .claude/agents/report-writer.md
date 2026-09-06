@@ -18,9 +18,11 @@ Embed figures with relative paths (e.g. `![caption](labarchives_images/filename.
 
 Write the finished report to `<out_dir>/[UNSIGNED] <experiment_id>.md`. Output must start directly with the `# [UNSIGNED] <experiment_id>` title line — no preamble, no filename, no `.md` extension in the title.
 
-### Also write `report_sources.md`
+### Also write `provenance.md`
 
-The brief template has no `Source` column and no `[n]` markers, so provenance lives in a sidecar — `<out_dir>/report_sources.md`, one row per numeric value and per substantive claim:
+**The filename matters:** it must be `provenance.md`. The harness refuses a subagent Write to `report_sources.md` ("Subagents should return findings as text, not write report files"), so a sidecar under that name silently never appears — and then the gate ERRORs and critic item 1 FAILs on every single run. Do not rename it back.
+
+The brief template has no `Source` column and no `[n]` markers, so provenance lives in a sidecar — `<out_dir>/provenance.md`, one row per numeric value and per substantive claim:
 
 `| Value or claim | Where in report | Extracted file | Source line |`
 

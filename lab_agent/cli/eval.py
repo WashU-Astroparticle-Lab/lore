@@ -169,11 +169,11 @@ def check(out_dir: Path) -> list[Finding]:
 
             # Provenance moved from visible [n] citations to a sidecar, so the
             # sidecar is what must exist. Without it nothing can audit the numbers.
-            sources_text = _read(out_dir / "report_sources.md") or ""
+            sources_text = _read(out_dir / "provenance.md") or ""
             if not sources_text.strip():
-                err("report_sources.md missing or empty (report-writer must emit it)")
+                err("provenance.md missing or empty (report-writer must emit it)")
             elif sources_text.count("|") < 8:  # header + separator + >=1 real row
-                warn("report_sources.md has no value rows — every number needs one")
+                warn("provenance.md has no value rows — every number needs one")
         # The Slack summary is posted to the lab verbatim and is the only part
         # most people read, so it must exist and be reviewable (Stage A1). The
         # critic checks its numbers and hedging against the report; here we only

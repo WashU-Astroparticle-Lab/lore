@@ -140,7 +140,7 @@ After all Phase A agents finish **and the DR answer is resolved**, spawn **`synt
 
 ### Phase C — report writing (1 subagent)
 
-After Phase B, spawn **`report-writer`** with the `<out_dir>` prompt → `<out_dir>/[UNSIGNED] <experiment_id>.md`. It follows `docs/report_style_guide.md` and writes `report_sources.md` + `slack_summary.md` alongside.
+After Phase B, spawn **`report-writer`** with the `<out_dir>` prompt → `<out_dir>/[UNSIGNED] <experiment_id>.md`. It follows `docs/report_style_guide.md` and writes `provenance.md` + `slack_summary.md` alongside.
 
 Include in the spawn prompt, when you have them:
 - **the stated objective** from intake Q1 — it outranks anything inferred from notebook code;

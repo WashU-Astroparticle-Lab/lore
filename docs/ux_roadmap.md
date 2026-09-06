@@ -148,7 +148,7 @@ Item 1 checks the Key Parameters `Source` column; item 9 checks `[n]` citation
 markers. Both disappear with the new template, and sourcing discipline must not
 disappear with them.
 
-- `report-writer` emits a sidecar `report_sources.md`:
+- `report-writer` emits a sidecar `provenance.md`:
   `| value or claim | where in report | extracted file | exact source line |`
 - Item 1 becomes: every numeric value in the report body appears in the sidecar and
   matches the cited extracted file.

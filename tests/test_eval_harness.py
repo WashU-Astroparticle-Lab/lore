@@ -54,7 +54,7 @@ def _good_dir(tmp: str) -> Path:
     )
     # Stage B: provenance moved from visible [n] citations to this sidecar, so a
     # complete run directory now carries one.
-    (d / "report_sources.md").write_text(
+    (d / "provenance.md").write_text(
         "# Sources for exp_x\n\n"
         "| Value or claim | Where in report | Extracted file | Source line |\n"
         "|---|---|---|---|\n"

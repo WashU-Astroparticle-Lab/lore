@@ -90,7 +90,7 @@ def _mkrun(summary: str | None, report: str = REPORT, sources: str | None = SOUR
     if summary is not None:
         (d / "slack_summary.md").write_text(summary, encoding="utf-8")
     if sources is not None:
-        (d / "report_sources.md").write_text(sources, encoding="utf-8")
+        (d / "provenance.md").write_text(sources, encoding="utf-8")
     return d
 
 
@@ -144,15 +144,15 @@ def test_brief_template_is_accepted() -> None:
 
 def test_sources_sidecar_required() -> None:
     errors, _ = _findings(_mkrun(SUMMARY, report=BRIEF_REPORT, sources=None))
-    check("a missing report_sources.md is an ERROR",
-          any("report_sources" in e for e in errors))
+    check("a missing provenance.md is an ERROR",
+          any("provenance" in e for e in errors))
 
     header_only = (
         "| Value or claim | Where in report |\n|---|---|\n"
     )
     _, warnings = _findings(_mkrun(SUMMARY, report=BRIEF_REPORT, sources=header_only))
     check("a sidecar with no value rows warns",
-          any("report_sources" in w for w in warnings))
+          any("provenance" in w for w in warnings))
 
 
 def test_duplicate_key_parameters_still_caught() -> None:

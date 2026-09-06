@@ -35,7 +35,7 @@ For example:
 - **Brief (default)** — "Brief report sections" below. Readable by the whole group, every exact number retained.
 - **Full** — "Full report sections" below. Use only when explicitly requested, or when the report is a formal record for an external audience.
 
-Both templates obey the same **Rules** section: sourcing, claim strength, and figure honesty do not relax with the format. Both also require the sourcing sidecar (`report_sources.md`) and the Slack summary (`slack_summary.md`).
+Both templates obey the same **Rules** section: sourcing, claim strength, and figure honesty do not relax with the format. Both also require the sourcing sidecar (`provenance.md`) and the Slack summary (`slack_summary.md`).
 
 ---
 
@@ -124,9 +124,9 @@ Bullet list of all artifacts used, with clickable links where possible:
 **11. Citations**
 A numbered list mapping each `[n]` marker used in the report to its exact source — a LabArchives page + entry, a notebook cell (`## Cell N` of a file in `notebooks.md`), a data file, a dependency constant, or the DR data. **Every Key Parameters row carries a `[n]`** resolving here; other key numeric claims should too where practical. Never cite a link marked `not_found`/`unreachable` in `link_check.md` — write `[MISSING: <url>]` instead. (This formalizes the `Source` column into checkable claim→source links.)
 
-## The sourcing sidecar — `report_sources.md` (both templates)
+## The sourcing sidecar — `provenance.md` (both templates)
 
-The full template proves provenance in the reader's face, with a `Source` column and `[n]` markers. The brief template drops both — so provenance moves to a sidecar instead of evaporating. Write `<out_dir>/report_sources.md` alongside every report:
+The full template proves provenance in the reader's face, with a `Source` column and `[n]` markers. The brief template drops both — so provenance moves to a sidecar instead of evaporating. Write `<out_dir>/provenance.md` alongside every report:
 
 ```markdown
 # Sources for [UNSIGNED] <experiment_id>
