@@ -57,6 +57,7 @@ from ..models import (
 )
 from ..sources import GitHubAdapter, LabArchivesAdapter
 from ..sources.github import parse_github_url
+from ..retention import figure_hashes as _figure_hashes
 from ..sources.labarchives.auth import cookies_still_valid
 
 # Folder names that describe a container rather than an experiment. A GitHub URL
@@ -582,6 +583,15 @@ def run(
         "run_timestamp": datetime.now().isoformat(timespec="seconds"),
         "files": files_written,
         "fetch_timings_sec": timings,
+        # A content hash per figure, so this run stays verifiable. GitHub figures
+        # are already pinned exactly by github_commit_sha, but LabArchives ones
+        # are pinned by nothing — a re-fetch resolves the page by TITLE and takes
+        # whatever is on it now. If the page is edited later, the same filename
+        # can return a different image, and because LA figures are numbered
+        # positionally (img_1, img_5 …) an insertion shifts every later index, so
+        # a citation quietly points at the wrong figure. Comparing these hashes
+        # after a re-fetch turns that from invisible into a reported mismatch.
+        "figure_hashes": _figure_hashes(out_dir),
     }
     (out_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"

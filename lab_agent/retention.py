@@ -185,10 +185,29 @@ def strip_images(run_dir: Path, apply: bool = False) -> tuple[int, int]:
     if not images:
         return 0, 0
     freed = _size(images)
+    # Record a content hash per figure BEFORE deleting it. GitHub figures are
+    # pinned exactly by the commit SHA in metadata.json, but LabArchives figures
+    # are pinned by nothing: a re-fetch resolves "the page with this title" and
+    # takes whatever is on it now. If the page was edited, the same filename can
+    # come back as a different picture — and because LA figures are named
+    # positionally (img_1, img_5 …), inserting one image at the top shifts every
+    # later index, so a report's citation silently points at the wrong figure.
+    # These hashes make that detectable instead of invisible.
+    hashes = {}
+    for f in images:
+        try:
+            hashes[str(f.relative_to(run_dir)).replace("\\", "/")] = hashlib.sha256(
+                f.read_bytes()).hexdigest()[:16]
+        except OSError:
+            continue
     manifest = {
         "pruned_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "reason": "figures are reconstructible; the report is in LabArchives",
         "files": sorted(str(f.relative_to(run_dir)).replace("\\", "/") for f in images),
+        "sha256_16": hashes,
+        "verify": ("After a re-fetch run verify_figures() — a mismatch means the source "
+                   "page changed since the report was written, so the report's figure "
+                   "descriptions no longer match the files on disk."),
         "bytes_freed": freed,
         "regenerate": (
             "GitHub figures: re-run run.py with the github_url + commit SHA in "
@@ -206,6 +225,66 @@ def strip_images(run_dir: Path, apply: bool = False) -> tuple[int, int]:
     (run_dir / PRUNE_MANIFEST).write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return len(images), freed
+
+
+def figure_hashes(run_dir: Path) -> dict:
+    """Content hash per figure in a run, keyed by path relative to the run dir.
+
+    Written into metadata.json at fetch time so a run is verifiable whether or
+    not it is ever slimmed.
+    """
+    out = {}
+    for f in run_images(run_dir):
+        try:
+            out[str(f.relative_to(run_dir)).replace("\\", "/")] = hashlib.sha256(
+                f.read_bytes()).hexdigest()[:16]
+        except OSError:
+            continue
+    return out
+
+
+def verify_figures(run_dir: Path) -> dict:
+    """Compare the figures on disk against the hashes recorded for this run.
+
+    Returns {"checked", "matched", "changed", "missing", "unverifiable"}.
+
+    `changed` is the one that matters: a figure whose bytes differ from what the
+    report was written against. For a LabArchives figure that means the page was
+    edited after the report — either the plot was replaced, or an insertion
+    shifted the positional img_N numbering so this filename is now a different
+    picture entirely. Either way the report's description of it is stale.
+    """
+    recorded: dict = {}
+    meta_path = run_dir / "metadata.json"
+    if meta_path.exists():
+        try:
+            recorded = json.loads(meta_path.read_text(encoding="utf-8")).get("figure_hashes") or {}
+        except Exception:
+            recorded = {}
+    if not recorded:
+        manifest = run_dir / PRUNE_MANIFEST
+        if manifest.exists():
+            try:
+                recorded = json.loads(manifest.read_text(encoding="utf-8")).get("sha256_16") or {}
+            except Exception:
+                recorded = {}
+
+    if not recorded:
+        return {"checked": 0, "matched": [], "changed": [], "missing": [],
+                "unverifiable": "no figure hashes were recorded for this run"}
+
+    current = figure_hashes(run_dir)
+    matched, changed, missing = [], [], []
+    for rel, want in recorded.items():
+        got = current.get(rel)
+        if got is None:
+            missing.append(rel)
+        elif got == want:
+            matched.append(rel)
+        else:
+            changed.append(rel)
+    return {"checked": len(recorded), "matched": matched, "changed": changed,
+            "missing": missing, "unverifiable": None}
 
 
 def duplicate_stats(root: Path) -> dict:

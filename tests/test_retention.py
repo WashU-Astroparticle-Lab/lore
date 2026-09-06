@@ -20,8 +20,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lab_agent.retention import (
-    PRUNE_MANIFEST, classify_run, duplicate_stats, idle_days, in_active_use,
-    run_images, strip_images, touch_used,
+    PRUNE_MANIFEST, classify_run, duplicate_stats, figure_hashes, idle_days,
+    in_active_use, run_images, strip_images, touch_used, verify_figures,
 )
 
 PASSED = 0
@@ -163,6 +163,60 @@ def test_cache_prune_respects_active_use() -> None:
     check("an old idle page still goes", "page_archived" in doomed)
 
 
+def test_figure_hashes_detect_a_changed_source() -> None:
+    """LabArchives figures are pinned by nothing — a re-fetch takes whatever is
+    on the page today.
+
+    GitHub figures are exact: metadata.json holds the commit SHA. LabArchives
+    records only a page TITLE, so if the page is edited the same filename can
+    return a different picture — and because LA figures are numbered positionally
+    (img_1, img_5 …), inserting one image at the top shifts every later index and
+    a report's citation quietly points at the wrong figure. Hashes make that a
+    reported mismatch instead of an invisible one.
+    """
+    root = Path(tempfile.mkdtemp())
+    d = _run(root, "exp", report=True, uploaded=True, n_images=3)
+
+    meta = json.loads((d / "metadata.json").read_text(encoding="utf-8"))
+    meta["figure_hashes"] = figure_hashes(d)
+    (d / "metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    v = verify_figures(d)
+    check("an untouched run verifies clean",
+          len(v["matched"]) == 3 and not v["changed"] and not v["missing"])
+
+    # The page was edited: same filename, different picture.
+    (d / "github_images" / "fig_1.png").write_bytes(b"a completely different plot")
+    v = verify_figures(d)
+    check("a replaced figure is reported as changed", v["changed"] == ["github_images/fig_1.png"])
+    check("the untouched ones still match", len(v["matched"]) == 2)
+
+    # A figure that vanished from the page.
+    (d / "github_images" / "fig_2.png").unlink()
+    v = verify_figures(d)
+    check("a vanished figure is reported as missing", "github_images/fig_2.png" in v["missing"])
+
+    # A run with nothing recorded must say so rather than claim success.
+    bare = _run(root, "no_hashes", report=True, uploaded=True)
+    check("an unrecorded run is reported unverifiable",
+          verify_figures(bare)["unverifiable"] is not None)
+
+
+def test_strip_records_hashes_before_deleting() -> None:
+    """Slimming must not destroy the only evidence of what the figures were."""
+    root = Path(tempfile.mkdtemp())
+    d = _run(root, "exp", report=True, uploaded=True, n_images=3)
+    strip_images(d, apply=True)
+
+    manifest = json.loads((d / PRUNE_MANIFEST).read_text(encoding="utf-8"))
+    check("the manifest carries a hash per figure", len(manifest["sha256_16"]) == 3)
+    check("it explains what a mismatch means", "changed" in manifest["verify"])
+    check("verify falls back to the manifest when metadata has none",
+          verify_figures(d)["unverifiable"] is None)
+    check("and reports the figures as missing (they were deleted)",
+          len(verify_figures(d)["missing"]) == 3)
+
+
 def test_duplicate_detection() -> None:
     root = Path(tempfile.mkdtemp())
     same = b"x" * 5000
@@ -212,6 +266,8 @@ if __name__ == "__main__":
     test_strip_keeps_the_record()
     test_active_use_beats_every_other_signal()
     test_cache_prune_respects_active_use()
+    test_figure_hashes_detect_a_changed_source()
+    test_strip_records_hashes_before_deleting()
     test_duplicate_detection()
     test_gate_tolerates_a_slimmed_run()
     print(f"\ntest_retention: {PASSED} checks passed")
