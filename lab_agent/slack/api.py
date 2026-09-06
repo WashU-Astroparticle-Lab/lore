@@ -66,7 +66,14 @@ def dm_event_text(event: dict) -> str | None:
     text = unwrap_slack_text(event.get("text") or "").strip()
     names = [f.get("name", "file") for f in (event.get("files") or [])]
     if names:
-        text = (text + f"\n[uploaded file(s): {', '.join(names)}]").strip()
+        # Carry the FILE MESSAGE's own ts, not just the names. The spawn prompt
+        # otherwise offers only the thread_ts, and a session reaching for the
+        # attachments naturally tries that first — which returns nothing, because
+        # the files hang off this message, not the thread parent. Observed live:
+        # one wasted fetch-files call plus a read-thread round-trip to recover.
+        ts = event.get("ts", "")
+        where = f" — message ts {ts}" if ts else ""
+        text = (text + f"\n[uploaded file(s): {', '.join(names)}{where}]").strip()
     return text or None
 
 

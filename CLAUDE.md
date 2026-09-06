@@ -21,12 +21,22 @@ You are the main session. Read `lab_config.md`, figure out which request type th
 Read `lab_config.md` in the project root (same directory as this file). It contains all lab-specific configuration:
 
 - `PROJECT_ROOT` — absolute path to this project on the current machine
+- `PYTHON` — **absolute path to the interpreter that has the project's dependencies**
 - Required `.env` key names and their purposes
 - LabArchives notebook names (`Primary notebook`, `Other notebooks`)
 - `Upload folder` — the LabArchives folder where reports are posted
 - `Wiring diagram page` — page title used for RF attenuation cross-check
 
-Use these values wherever a skill references `$PROJECT_ROOT`, `$PRIMARY_NOTEBOOK`, `$UPLOAD_FOLDER`, and `$WIRING_DIAGRAM_PAGE`. All `cd` commands use `$PROJECT_ROOT`.
+Use these values wherever a skill references `$PROJECT_ROOT`, `$PYTHON`, `$PRIMARY_NOTEBOOK`, `$UPLOAD_FOLDER`, and `$WIRING_DIAGRAM_PAGE`. All `cd` commands use `$PROJECT_ROOT`.
+
+**Always invoke Python as `$PYTHON`, never as bare `python`.** On this machine bare
+`python` resolves to a separate install with none of the project's dependencies, and a
+session that used it burned ten tool calls on `ModuleNotFoundError`, hunted for a
+non-existent `.venv`, and finally `pip install`-ed into the system interpreter to get
+moving — modifying the machine to work around a path problem.
+
+**If a project module is missing, that is the wrong interpreter, not a missing package.**
+Never `pip install` to get past it. Re-run with `$PYTHON` and it will already be there.
 
 ## Which skill to invoke — classify first
 
@@ -109,7 +119,7 @@ You can search and read LabArchives pages directly via the `lab_agent.sources.la
 
 This is the complete set. **Do not read pipeline source (`run_pipeline.py`, `github.py`, `upload.py`, `publish/labarchives.py`, the LightRAG KV stores) to work out how to do something** — every capability is below. If none of them fits, say so and ask; improvising against internals is slow, breaks on refactors, and puts a production session one step from editing pipeline code.
 
-All run from `$PROJECT_ROOT`.
+All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from `lab_config.md`.
 
 | Need | Command |
 |---|---|

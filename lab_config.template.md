@@ -8,6 +8,7 @@ The pipeline agent reads `lab_config.md` at startup — do not commit it.
 | Key | Value |
 |-----|-------|
 | PROJECT_ROOT | /path/to/your/LORE/checkout |
+| PYTHON | <absolute path to the interpreter that has the project's dependencies, e.g. C:/Users/you/miniconda3/python.exe> |
 
 ## Required .env keys
 

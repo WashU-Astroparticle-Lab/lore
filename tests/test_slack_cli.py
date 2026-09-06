@@ -189,9 +189,13 @@ def test_dm_event_text() -> None:
 
     # The real regression: a photo with no caption.
     got = api.dm_event_text({"subtype": "file_share", "text": "",
-                             "files": [{"name": "IMG_4708.jpg"}]})
+                             "files": [{"name": "IMG_4708.jpg"}], "ts": "1788712059.316019"})
     check("a text-less file upload wakes the bot", got is not None)
     check("the file name reaches the session", "IMG_4708.jpg" in (got or ""))
+    # Observed live: without the ts the session reaches for thread_ts, gets
+    # nothing back, and needs a read-thread round-trip to find the real message.
+    check("the file message's own ts reaches the session too",
+          "1788712059.316019" in (got or ""))
 
     got = api.dm_event_text({"subtype": "file_share", "text": "here you go",
                              "files": [{"name": "a.png"}, {"name": "b.png"}]})
