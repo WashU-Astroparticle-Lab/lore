@@ -129,6 +129,7 @@ All run from `$PROJECT_ROOT`.
 | Refresh LabArchives cookies | `python get_la_cookies.py` |
 | Slack (post/upload/read-thread/channels/search/fetch-files) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above |
 | DR conditions | `python run_dr.py "YYYY-MM-DD" [--hours N]` |
+| Disk footprint / prune caches | `python -m lab_agent.cli.cleanup [--apply]` — dry run by default; never touches `outputs/` |
 
 ## Known limitation
 Web app page IDs (e.g. `11400322`) do **not** map to API tree_ids. Pass page titles or base64 tree_ids instead. There is therefore **no per-page deep link** — when telling someone where a report is, give the notebook URL printed by the upload command plus "$UPLOAD_FOLDER / \<page title\>". Never invent, shorten, or elide a URL: a fabricated GitHub link in a draft channel message 404'd for the whole lab.

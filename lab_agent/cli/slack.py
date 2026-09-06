@@ -202,6 +202,10 @@ def cmd_fetch_files(opts: dict) -> None:
         saved = api.fetch_message_files(channel, ts, out)
     except api.SlackError as exc:
         _die(f"fetch-files failed: {exc}", 2)
+    # Bound the cache: these are re-fetchable in seconds, so old ones go.
+    from ..cache_prune import prune_quietly
+    prune_quietly(PROJECT_ROOT / "knowledge" / "slack_files")
+
     if not saved:
         print(f"[slack] no downloadable files on message {ts}")
         return

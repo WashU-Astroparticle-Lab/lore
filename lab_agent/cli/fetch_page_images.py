@@ -54,6 +54,12 @@ def main() -> None:
               "(Run `python -m lab_agent.cli.build_kb` to (re)build it, or check the page name.)")
         sys.exit(1)
 
+    # Bound the cache before adding to it. These figures are re-fetchable in
+    # seconds (they just need a live cookie), so stale pages are not worth
+    # keeping — and this tree sits inside OneDrive, which syncs every byte.
+    from ..cache_prune import prune_quietly
+    prune_quietly(KNOWLEDGE_ROOT / "image_cache")
+
     out = KNOWLEDGE_ROOT / "image_cache" / _safe(rec["page"])
     out.mkdir(parents=True, exist_ok=True)
     adapter = LabArchivesAdapter("__fetch__")
