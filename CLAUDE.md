@@ -67,7 +67,7 @@ python -m lab_agent.cli.slack upload      --channel <C…> [--thread <ts>] --fil
 python -m lab_agent.cli.slack read-thread --channel <C…> --thread <ts> [--limit 50]
 python -m lab_agent.cli.slack channels    [--filter <substring>]
 python -m lab_agent.cli.slack search      --query "<terms>" [--limit 20]
-python -m lab_agent.cli.slack fetch-files --channel <C…> --ts <message ts>
+python -m lab_agent.cli.slack fetch-files --channel <C…> --ts <message ts> [--out <dir>]
 ```
 
 **A message is not just its text.** `search` shows each hit with the message either
@@ -75,7 +75,9 @@ side of it and lists any ATTACHMENTS, because a claim and the screenshots behind
 routinely separate messages — a matched line read alone looks like settled fact when it
 is one turn of a live discussion. When a message's meaning could depend on its images,
 run `fetch-files` on its `ts` and **Read the downloaded images** before concluding
-anything. A real example: "the presto power calibration was bugged so all previous
+anything. They land in the OS temp dir and are pruned after a day — pass `--out` only if a
+figure is worth keeping. (There is no way to view them without downloading: `Read` takes a
+path, and Slack's `url_private` needs an auth header, so no URL can be handed to vision.) A real example: "the presto power calibration was bugged so all previous
 measurement regarding power is quite off" reads as a sweeping result; the pictures in
 that conversation showed the problem was in plotting/acquisition code and unrelated to
 the experiment it appeared to condemn.

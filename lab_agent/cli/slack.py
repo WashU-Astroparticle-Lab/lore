@@ -7,7 +7,7 @@ Slack from the pipeline — the ONE supported way for an agent to talk to Slack.
     python -m lab_agent.cli.slack read-thread --channel C123 --thread TS [--limit 50]
     python -m lab_agent.cli.slack channels    [--filter kid]
     python -m lab_agent.cli.slack search      --query "presto vna" [--limit 20]
-    python -m lab_agent.cli.slack fetch-files --channel C123 --ts 1788391397.681369
+    python -m lab_agent.cli.slack fetch-files --channel C123 --ts 1788391397.681369 [--out DIR]
 
 Why this exists: every session used to hand-roll these calls as `python -c "..."`
 one-liners and got them wrong in a different way each time — backticks in the
@@ -23,9 +23,10 @@ Exit codes: 0 delivered and verified, 1 usage error, 2 the Slack call failed.
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 
-from ..config import PROJECT_ROOT, load_env
+from ..config import load_env
 from ..slack import api
 
 
@@ -197,20 +198,29 @@ def cmd_search(opts: dict) -> None:
 def cmd_fetch_files(opts: dict) -> None:
     channel = opts.get("channel") or _die("fetch-files needs --channel")
     ts = opts.get("ts") or _die("fetch-files needs --ts (from a search or read-thread line)")
-    out = Path(opts.get("out") or (PROJECT_ROOT / "knowledge" / "slack_files" / ts.replace(".", "_")))
+
+    # Default to the OS temp dir, not the project tree. Slack attachments are
+    # looked at once and then irrelevant, and the project tree lives inside
+    # OneDrive, which syncs every byte regardless of .gitignore. --out persists
+    # them deliberately when a figure is worth keeping.
+    if opts.get("out"):
+        out = Path(opts["out"])
+    else:
+        out = Path(tempfile.gettempdir()) / "lore_slack_files" / ts.replace(".", "_")
     try:
         saved = api.fetch_message_files(channel, ts, out)
     except api.SlackError as exc:
         _die(f"fetch-files failed: {exc}", 2)
     # Bound the cache: these are re-fetchable in seconds, so old ones go.
     from ..cache_prune import prune_quietly
-    prune_quietly(PROJECT_ROOT / "knowledge" / "slack_files")
+    prune_quietly(out.parent, max_age_days=1, max_mb=50)
 
     if not saved:
         print(f"[slack] no downloadable files on message {ts}")
         return
-    print(f"[slack] {len(saved)} file(s) downloaded — READ THEM before drawing any "
-          "conclusion from the message text:")
+    where = "temp (auto-pruned after a day)" if not opts.get("out") else str(out)
+    print(f"[slack] {len(saved)} file(s) downloaded to {where} — READ THEM before "
+          "drawing any conclusion from the message text:")
     for p in saved:
         print(f"  {p}")
 
