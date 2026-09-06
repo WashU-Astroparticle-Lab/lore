@@ -7,25 +7,32 @@ description: Generate and upload a full experiment report from a GitHub URL and/
 
 Run this when the user gives a GitHub URL and/or LabArchives page names for an experiment and wants a report. Read `lab_config.md` first (per CLAUDE.md) for `$PROJECT_ROOT`, `$PRIMARY_NOTEBOOK`, `$UPLOAD_FOLDER`, `$WIRING_DIAGRAM_PAGE`. Do **not** write the report yourself — the subagents do.
 
-## Step 0 — ask the DR question up front (never wait for the answer)
+## Step 0 — intake, up front (never wait for the answers)
 
-Ask about dilution refrigerator conditions **immediately, before any fetching**, so the user can answer while the pipeline runs:
+Post these **immediately, before any fetching**, so the user answers while the pipeline runs:
 
-> While I fetch the data — would you like dilution refrigerator conditions included in this report?
-> If yes, reply with the date and time window of your measurement (e.g. 'Feb 18 2025' or 'Feb 18 2025, 14:00–22:00'). If not, just say "no".
+> Starting now — three quick things you can answer while I work:
+> 1. What question was this experiment trying to answer?
+> 2. Want dilution refrigerator conditions included? (date/window, or "no")
+> 3. Full report or brief?
 
-- **Slack session** (spawn prompt has a `Reply-to` line): post the question to the thread via `chat.postMessage`, then **continue straight to Step 1 without waiting**. The answer is collected later, in Step 2b.
+- **Q1 is the important one.** The pipeline infers the objective from the notebook code, and code shows what was *run*, not what it was *for* — a calibration-looking notebook whose real purpose was comparing instrument noise produced two rewrite cycles. Whatever the user answers becomes the experiment's stated objective for Phase B and C.
+- **Skip Q2 entirely for bench / room-temperature work** (spectrum analyser, VNA comparison, cabling, wiring) — there is no fridge involved, and asking anyway has stalled a pipeline for 12 minutes waiting on an answer that could not matter.
+- **Q3** defaults to brief (see `docs/report_style_guide.md`); "full" selects the detailed template.
+- Skip any part the original request already answered.
+- **Slack session** (spawn prompt has a `Reply-to` line): post via `python -m lab_agent.cli.slack post`, then **continue straight to Step 1 without waiting**. Answers are collected in Step 2b.
 - **Interactive session:** ask in chat and continue when the user answers.
-- If the original request already answers it ("include DR for Feb 18", "no DR needed"), skip the question and treat it as resolved.
 
-## Step 1 — verify .env is populated
+## Step 1 — verify credentials actually work
 
 ```bash
 cd $PROJECT_ROOT
-python -c "from lab_agent.config import check_env; check_env()"
+python -c "from lab_agent.config import check_env; check_env(live=True)"
 ```
 
-Only report set or missing — never print the values themselves. If any are missing, tell the user which ones to fill in before proceeding.
+`live=True` asks GitHub, Slack and LabArchives whether each credential is accepted — "set" is not "works", and a token that was present but returning 401 once cost 75 minutes across six exchanges before anyone probed it.
+
+Report only `set` / `MISSING` / `valid` / `INVALID` and the reason — **never** print a value, a length, or a prefix, and never paste one into Slack. If GITHUB_TOKEN is INVALID, say so and stop rather than starting a fetch that cannot succeed. An expired `LA_SESSION_COOKIE` is not a blocker here — Step 2 refreshes it automatically.
 
 ## Step 2 — run the pipeline
 
@@ -47,12 +54,22 @@ python run.py "<la_page_name_1>" "<la_page_name_2>"
 
 **If run.py exits with `COOKIE_REFRESH_NEEDED`:** immediately run `python get_la_cookies.py` (never ask the user), then rerun the exact same `run.py` command. Do not proceed without images.
 
-## Step 2b — resolve the DR answer (checked after Phase A, never before)
+## Step 2b — collect everything the user said while you worked (after Phase A, never before)
 
-Do **not** block Steps 2–3 on the DR answer — go straight from `run.py` to Phase A. Check for the answer only when Phase A finishes, right before Phase B:
+Do **not** block Steps 2–3 on the intake answers — go straight from `run.py` to Phase A. When Phase A finishes, read the whole thread back:
 
-- **Slack session:** fetch the thread with `conversations.replies` (channel + thread_ts from the `Reply-to` line) and look for the user's reply after the DR question.
-- **Interactive session:** the answer is already in the conversation.
+```bash
+python -m lab_agent.cli.slack read-thread --channel <channel> --thread <thread_ts>
+```
+
+**Messages sent while a session is running are never delivered to it** — the listener absorbs replies into the running thread. This read is the only way you will ever see them, and skipping it means an instruction the user watched you acknowledge ("you only need the two plots from the No Filter notebook") is silently dropped while your next post says "Writing report…".
+
+Handle every message since you started, not just the DR line:
+
+- **Q1 objective** → this is the experiment's stated goal; pass it verbatim to `synthesis` and `report-writer`.
+- **Q3 full/brief** → pass to `report-writer`.
+- **Any other instruction** ("only use these figures", "drop that section", "the cause was actually X") → apply it, and **acknowledge it in your next Slack post** so the user can see it landed. If you cannot apply it, say why. Never let one pass unmentioned.
+- **Interactive session:** the answers are already in the conversation.
 
 Then:
 - **yes** with a date/window → fetch DR data (below), spawn `dr-analyst`, wait, then proceed to Phase B.
@@ -123,7 +140,18 @@ After all Phase A agents finish **and the DR answer is resolved**, spawn **`synt
 
 ### Phase C — report writing (1 subagent)
 
-After Phase B, spawn **`report-writer`** with the `<out_dir>` prompt → `<out_dir>/[UNSIGNED] <experiment_id>.md`. It follows `docs/report_style_guide.md`.
+After Phase B, spawn **`report-writer`** with the `<out_dir>` prompt → `<out_dir>/[UNSIGNED] <experiment_id>.md`. It follows `docs/report_style_guide.md` and writes `report_sources.md` + `slack_summary.md` alongside.
+
+Include in the spawn prompt, when you have them:
+- **the stated objective** from intake Q1 — it outranks anything inferred from notebook code;
+- **`full`** if the user asked for a full/detailed report (otherwise the brief template is the default);
+- **standing preferences** for this user:
+
+```bash
+python -m lab_agent.cli.preferences show --user <slack_user_id>
+```
+
+Paste any output into the spawn prompt verbatim. These are presentation-only preferences the user has already stated on an earlier run ("brief", "no Key Parameters table", "dBm only") — re-establishing them every time is a cost they should only pay once.
 
 ### Phase D — critique and revision
 
@@ -196,6 +224,14 @@ When the user asks for a change to a report that is already written or uploaded 
 3. Re-run the structural gate, then re-upload with `python upload_to_labarchives.py outputs/<experiment_id>` — which now revises the existing page instead of creating a duplicate.
 
 If the user wants a **separate** document rather than a replacement (e.g. "make a simpler version *as well*"), pass the target filename to `report-writer` and upload it with `--report-file` and its own `--page-title`.
+
+**Record durable preferences.** When the request expresses a standing preference about *presentation* rather than this one report — "keep them shorter", "we don't use the Key Parameters table", "always dBm" — save it so the next run starts there:
+
+```bash
+python -m lab_agent.cli.preferences set --user <slack_user_id> --note "<the preference, one line>"
+```
+
+Only presentation. Never record anything that changes which numbers are reported, how strongly a claim is stated, or what the critic checks. A one-off ("drop section 4 from *this* report") is not a preference.
 
 ## Known limitation
 Web app page IDs (e.g. `11400322`) do **not** map to API tree_ids. Pass page titles or base64 tree_ids instead.

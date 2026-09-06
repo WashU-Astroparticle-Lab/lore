@@ -10,15 +10,15 @@ Read the `[UNSIGNED]` report, all `extracted_*.md`, and `connections.md` in `<ou
 
 ## Checklist (experiment reports)
 
-1. Every numeric value in the report's Key Parameters table matches the value in the extracted file its **Source** column cites — one of extracted_github.md, extracted_deps.md, extracted_labarchives.md, or extracted_dr.md. FAIL a value ONLY if it appears in none of the extracted files (i.e. it is unsourced/invented). Legitimately lab-sourced values (RF attenuation, DAC_CURRENT, hand-recorded saturation amplitudes, reference-clock offsets from lab notes) are NOT failures.
+1. **Every numeric value in the report is sourced.** Check against `<out_dir>/report_sources.md`, the sidecar the report-writer emits for both templates: each numeric value in the report body must have a row there, and the quoted **Source line** must actually appear in the extracted file that row names (extracted_github.md, extracted_deps.md, extracted_labarchives.md, extracted_dr.md). FAIL a value only if it appears in none of the extracted files — i.e. it is unsourced or invented. Legitimately lab-sourced values (RF attenuation, DAC_CURRENT, hand-recorded saturation amplitudes, reference-clock offsets from lab notes) are NOT failures. If `report_sources.md` is absent, that alone is a FAIL — provenance is not optional just because the brief template has no visible citations. (A *full*-template report additionally carries a `Source` column; check it agrees with the sidecar.)
 2. No figure description in the report contains visual content not present in the corresponding Figures sub-section of an extracted file.
 3. "Confirms" is not used unless connections.md documents a direct quantitative comparison that supports it.
 4. No step is described as executed that appears in the Goal vs. Executed map in connections.md as "no".
 5. No physics mechanism is named that does not appear in any extracted file.
-6. The Key Parameters table appears exactly once in the report.
-7. The Key Findings section does not restate sentences that already appear in Results.
+6. If the report has a Key Parameters table (full template only), it appears exactly once.
+7. No section restates sentences that already appear in another section (in the full template this is Key Findings vs Results; in the brief template it is a **Bottom line:** repeating its own paragraph verbatim).
 8. **No dead link is cited as a source.** If `link_check.md` exists in `<out_dir>`, the report cites no URL marked `not_found` or `unreachable` there.
-9. **Citations resolve.** If the report has a `# Citations` section, every `[n]` marker in the body resolves to a numbered entry, and every Key Parameters row carries a citation.
+9. **Citations resolve.** If the report has a `# Citations` section (full template), every `[n]` marker in the body resolves to a numbered entry and every Key Parameters row carries a citation. For a brief-template report there are no markers — instead every row of `report_sources.md` must name a real extracted file, and no row may be a placeholder.
 10. **The Slack summary matches the report.** `<out_dir>/slack_summary.md` must exist. Check it line by line against the report — it is posted to the lab verbatim and is the only part most readers see, so it gets the same scrutiny as the report itself:
     - every number in it appears in the report with the **same value, same units, and attached to the same label** (frequency, instrument, device, power level). A number paired with the wrong label is a FAIL, not a nitpick — e.g. reporting the 6.9 GHz offset against 6.44 GHz.
     - every claim carries **at least as much hedging as the report**. If the report says "consistent with", the summary saying "confirms"/"confirmed" is a FAIL. This applies even when the report earned that hedge through a revision.

@@ -5,6 +5,27 @@ Aug 26 + Aug 31 `presto_vna_spectrum` report thread (25 turns) and the Aug 17 Q&
 day (9 turns). Companion to `ROADMAP.md` (Stages 0–5 covered *capability*; this one
 covers *usability and the correctness of what actually reaches the human*).
 
+## Status (2026-09-05)
+
+| Stage | State |
+|---|---|
+| 0 — baseline commit | **done** — `f2296dd` + `5a794d3` on `stages-0-5-baseline` |
+| A — stop the bleeding | **done** — `746ece8` |
+| B — brief template default | **done** |
+| C — kill the improvisation | **done** |
+| D — interaction contract | **done** |
+| E — Q&A routing | **done** (E1); E2 cookie lifetime still open |
+
+Open follow-ups, both needing something outside the repo:
+- **Slack scope:** `conversations.list` returns `missing_scope` — the bot token has
+  `channels:read` but not `groups:read`, so `lab_agent.cli.slack channels` cannot list
+  channels yet. One scope to add in the Slack app config, then reinstall the app.
+- **E2 cookie lifetime:** `LA_SESSION_COOKIE` still expires inside a working session
+  (twice in 30 minutes on Aug 31). Self-refresh handles it, but each refresh costs a Duo
+  tap when off school wifi. Worth measuring the real TTL before designing around it.
+
+---
+
 ## The measuring stick
 
 LORE's value = (time it saves) − (time spent steering it). Measured over the

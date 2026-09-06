@@ -486,25 +486,50 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
 
         Pipeline steps and Slack progress updates (only for a fresh pipeline run):
 
-          1. FIRST, before anything else (unless the user's request already answered it):
-             Post the DR question via Python and continue immediately — do NOT wait:
-               "While I fetch the data — would you like dilution refrigerator conditions
-               included in this report? If yes, reply with the date and time window of your
-               measurement (e.g. 'Feb 18 2025' or 'Feb 18 2025, 14:00–22:00'). If not,
-               just say 'no'."
-          2. Post: "Checking credentials..." then check .env.
+          All Slack posting uses the CLI — never a hand-written python -c:
+             python -m lab_agent.cli.slack post --channel <ch> --thread <ts> --text-file <f>
+          Write the text with the Write tool first. Exit 0 means delivered AND verified.
+
+          1. FIRST, before anything else: post the INTAKE questions and continue
+             immediately — do NOT wait for answers. Skip any part the request already
+             answered, and skip the DR question entirely for bench / room-temperature
+             work (spectrum analyser, VNA bench comparison, wiring — anything not in
+             the fridge):
+               "Starting now — three quick things you can answer while I work:
+                1. What question was this experiment trying to answer?
+                2. Want dilution refrigerator conditions included? (date/window, or 'no')
+                3. Full report or brief?"
+             Answer 1 matters most: guessing the objective from the notebooks is what
+             causes rewrite cycles later. Answers arrive during Step 5.
+          2. Post: "Checking credentials..." then run:
+               python -c "from lab_agent.config import check_env; check_env(live=True)"
+             This validates the tokens rather than merely finding them. If GITHUB_TOKEN
+             is INVALID, say exactly that (and what to do) instead of starting a fetch
+             that will fail — a "set but 401" token once burned 75 minutes.
           3. Post: "Fetching GitHub and LabArchives data..." then run run.py.
              If run.py reports expired cookies, run `python get_la_cookies.py` immediately
              (never ask the user), then post: "Session cookies refreshed, retrying fetch..."
              and rerun run.py.
+             If run.py exits 4, it refused to overwrite another experiment's directory —
+             re-run with --experiment-id <a fresh name>. Do not use --force.
           4. Immediately after run.py completes: post "Data fetched — analyzing..." and
-             spawn the Phase A analysts (CLAUDE.md Step 3) WITHOUT waiting for the DR answer.
-          5. When Phase A finishes, check the thread for the user's DR answer
-             (conversations.replies via Python, using the Reply-to coordinates above):
-             - yes + date/window → fetch DR data and run dr-analyst (CLAUDE.md Step 2b)
-             - no → continue
-             - no answer yet → write the Step 2b reminder as your final text output and
-               exit; the next session continues from Phase B.
+             spawn the Phase A analysts (CLAUDE.md Step 3) WITHOUT waiting for answers.
+          5. When Phase A finishes, read the thread for everything the user has said
+             since you started:
+               python -m lab_agent.cli.slack read-thread --channel <ch> --thread <ts>
+             Messages sent while you were working were NOT delivered to you — the
+             listener absorbs them — so this read is the only way you will ever see
+             them. Treat every one as an instruction you already owe an answer to:
+             - the objective (intake Q1) → pass it to Phase B/C as the experiment's goal
+             - "full"/"brief" (intake Q3) → pass it to report-writer
+             - DR yes + date/window → fetch DR data and run dr-analyst (CLAUDE.md Step 2b)
+             - DR no, or a bench experiment → continue
+             - ANY other instruction ("only use the two plots from X", "drop section Y")
+               → apply it, and acknowledge it in your next post so the user knows it
+               landed. Never silently ignore one; a dropped instruction looks identical
+               to a followed one from their side.
+             - no DR answer yet and DR is relevant → write the Step 2b reminder as your
+               final text output and exit; the next session continues from Phase B.
           6. Post: "Writing report..." then run Phases B, C, D per CLAUDE.md.
           7. After saving the report file:
              Post: "Report written. Uploading to LabArchives..."

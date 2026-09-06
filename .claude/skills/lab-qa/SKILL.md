@@ -13,6 +13,19 @@ For two sub-capabilities this skill delegates (single source of truth — don't 
 
 ## Steps
 
+0. **Does the question name a page? Then read that page, don't ask the graph.**
+   For "summarise \<page\>", "what does \<page\> say about X", or any question naming one page, read the crawled copy directly:
+
+   ```bash
+   ls knowledge/labarchives/ | grep -i "<part of the page name>"
+   ```
+
+   then Read the matching `knowledge/labarchives/<safe_page_name>.md` — the full page text, already on disk, **free and instant**. Answer from it.
+
+   The graph is built for questions that span pages; on a single named page it is both slower and worse. Asked to summarise `20260702 JPL QPDs`, `query_kb` spent 69 s and came back thin — while the entire page text sat in the corpus unread. Reserve steps 1–2 for genuinely cross-page questions ("which chips have we measured", "have we ever seen X"), where the graph is strong.
+
+   If no corpus file matches the name, fall through to step 1.
+
 1. Query the knowledge graph: `python -m lab_agent.cli.query_kb "<the question>"`. It answers over the full crawled LabArchives corpus + past reports (LightRAG graph — falls back to keyword search if the graph isn't built), returning an answer with experiment/page **citations**.
 2. **Gauge coverage before answering.** If `query_kb`'s output clearly and specifically addresses what was asked, reply from it, **citing the source(s)**; **never fabricate numbers** — state only what the graph returns. If the output is thin, generic, or doesn't address the specifics, treat it as low-confidence and go to step 4 instead of stretching it into an answer.
 3. **Do NOT** run `run.py`, **do NOT** open/fetch LabArchives pages, and **NEVER** run `get_la_cookies.py` for a text-only knowledge question.

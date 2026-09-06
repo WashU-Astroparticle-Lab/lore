@@ -52,6 +52,15 @@ def _good_dir(tmp: str) -> Path:
         "*exp_x* is in LabArchives.\n\n- One finding, consistent with the data\n",
         encoding="utf-8",
     )
+    # Stage B: provenance moved from visible [n] citations to this sidecar, so a
+    # complete run directory now carries one.
+    (d / "report_sources.md").write_text(
+        "# Sources for exp_x\n\n"
+        "| Value or claim | Where in report | Extracted file | Source line |\n"
+        "|---|---|---|---|\n"
+        '| 6.9 GHz | Main Result | extracted_github.md | "Frequency of interest 6.9 GHz" |\n',
+        encoding="utf-8",
+    )
     return d
 
 

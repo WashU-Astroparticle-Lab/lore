@@ -1,0 +1,186 @@
+"""
+Slack from the pipeline — the ONE supported way for an agent to talk to Slack.
+
+    python -m lab_agent.cli.slack post        --channel C123 [--thread TS] --text-file msg.txt
+    python -m lab_agent.cli.slack upload      --channel C123 [--thread TS] --file a.png [--file b.png]
+                                              [--comment-file note.txt] [--title "..."]
+    python -m lab_agent.cli.slack read-thread --channel C123 --thread TS [--limit 50]
+    python -m lab_agent.cli.slack channels    [--filter kid]
+
+Why this exists: every session used to hand-roll these calls as `python -c "..."`
+one-liners and got them wrong in a different way each time — backticks in the
+message text were executed by the shell (words silently vanished from messages
+users received, and one failure printed a session cookie), Windows paths broke
+the Python literal, `files.upload` answered `method_deprecated`, and a rejected
+call looked exactly like a delivered one. Message text is therefore only ever
+read from a FILE, never from a shell argument, and every command verifies by
+reading back what it did before reporting success.
+
+Exit codes: 0 delivered and verified, 1 usage error, 2 the Slack call failed.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+from ..config import load_env
+from ..slack import api
+
+
+def _die(msg: str, code: int = 1) -> None:
+    print(f"[slack] {msg}")
+    sys.exit(code)
+
+
+def _parse(argv: list[str]) -> tuple[str, dict]:
+    if not argv:
+        print(__doc__)
+        sys.exit(1)
+    cmd, rest = argv[0], argv[1:]
+    opts: dict = {"file": [], "limit": "50"}
+    i = 0
+    while i < len(rest):
+        arg = rest[i]
+        if not arg.startswith("--"):
+            _die(f"unexpected argument {arg!r}")
+        key, _, inline = arg.partition("=")
+        field = key[2:].replace("-", "_")
+        if inline:
+            value = inline
+            i += 1
+        elif i + 1 < len(rest) and not rest[i + 1].startswith("--"):
+            value = rest[i + 1]
+            i += 2
+        else:
+            _die(f"{key} needs a value")
+        if field == "file":
+            opts["file"].append(value)
+        else:
+            opts[field] = value
+    return cmd, opts
+
+
+def _read_text(path_str: str, label: str) -> str:
+    path = Path(path_str)
+    if not path.exists():
+        _die(f"{label} not found: {path}")
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        _die(f"{label} is empty: {path}")
+    return text
+
+
+def cmd_post(opts: dict) -> None:
+    channel = opts.get("channel") or _die("post needs --channel")
+    if not opts.get("text_file"):
+        _die("post needs --text-file (message text is never passed as a shell argument)")
+    text = _read_text(opts["text_file"], "--text-file")
+
+    try:
+        ts = api.post_message_checked(channel, opts.get("thread"), text)
+    except api.SlackError as exc:
+        _die(f"post failed: {exc}", 2)
+
+    if api.message_exists(channel, ts):
+        print(f"[slack] posted and verified: channel={channel} ts={ts} ({len(text)} chars)")
+    else:
+        # Delivered per the API but not readable back — say so rather than
+        # letting the agent tell the user it landed.
+        print(f"[slack] WARNING: posted (ts={ts}) but could not read it back — verify manually")
+        sys.exit(2)
+
+
+def cmd_upload(opts: dict) -> None:
+    channel = opts.get("channel") or _die("upload needs --channel")
+    files = opts.get("file") or []
+    if not files:
+        _die("upload needs at least one --file")
+    comment = _read_text(opts["comment_file"], "--comment-file") if opts.get("comment_file") else None
+
+    uploaded, failed = [], []
+    for n, f in enumerate(files):
+        path = Path(f)
+        if not path.exists():
+            failed.append(f"{f}: not found")
+            continue
+        try:
+            file_id = api.upload_file(
+                channel,
+                opts.get("thread"),
+                path,
+                title=opts.get("title") if len(files) == 1 else path.name,
+                # Only the first upload carries the comment, else it repeats.
+                comment=comment if n == 0 else None,
+            )
+        except api.SlackError as exc:
+            failed.append(f"{path.name}: {exc}")
+            continue
+        if api.file_is_shared(file_id, channel):
+            uploaded.append(f"{path.name} (id={file_id})")
+        else:
+            failed.append(f"{path.name}: uploaded but not visible in {channel}")
+
+    for u in uploaded:
+        print(f"[slack] uploaded and verified: {u}")
+    for f in failed:
+        print(f"[slack] FAILED: {f}")
+    if failed:
+        sys.exit(2)
+
+
+def cmd_read_thread(opts: dict) -> None:
+    channel = opts.get("channel") or _die("read-thread needs --channel")
+    thread = opts.get("thread") or _die("read-thread needs --thread")
+    try:
+        body = api.api_get("conversations.replies", {
+            "channel": channel, "ts": thread, "limit": opts["limit"],
+        })
+    except api.SlackError as exc:
+        _die(f"read-thread failed: {exc}", 2)
+
+    messages = body.get("messages", [])
+    print(f"[slack] {len(messages)} message(s) in thread {thread}")
+    for m in messages:
+        who = "bot" if m.get("bot_id") else m.get("user", "?")
+        text = api.unwrap_slack_text(m.get("text", "")).replace("\n", " ")
+        line = f"  [{m.get('ts')}] {who}: {text[:300]}"
+        names = [f.get("name", "?") for f in m.get("files", []) or []]
+        if names:
+            line += f"   FILES: {', '.join(names)}"
+        print(line)
+
+
+def cmd_channels(opts: dict) -> None:
+    try:
+        channels = api.list_channels()
+    except api.SlackError as exc:
+        _die(f"channels failed: {exc}", 2)
+    needle = (opts.get("filter") or "").lower()
+    rows = [c for c in channels if needle in c["name"].lower()]
+    rows.sort(key=lambda c: (not c["is_member"], c["name"]))
+    print(f"[slack] {len(rows)} channel(s); the bot can only post where is_member=True")
+    for c in rows:
+        mark = "member" if c["is_member"] else "  --  "
+        kind = "private" if c["is_private"] else "public "
+        print(f"  {mark}  {kind}  #{c['name']}  ({c['id']})")
+
+
+COMMANDS = {
+    "post": cmd_post,
+    "upload": cmd_upload,
+    "read-thread": cmd_read_thread,
+    "channels": cmd_channels,
+}
+
+
+def main() -> None:
+    load_env()
+    cmd, opts = _parse(sys.argv[1:])
+    handler = COMMANDS.get(cmd)
+    if handler is None:
+        _die(f"unknown command {cmd!r} — one of: {', '.join(COMMANDS)}")
+    handler(opts)
+
+
+if __name__ == "__main__":
+    main()

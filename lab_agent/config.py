@@ -54,19 +54,99 @@ def load_env() -> None:
     _env_loaded = True
 
 
-def check_env(keys: list[str] | None = None) -> bool:
+def check_env(keys: list[str] | None = None, live: bool = False) -> bool:
     """Print set/MISSING for each required .env key. Never prints values.
 
-    Returns True if all keys are set.
+    With ``live=True`` also asks each service whether the credential actually
+    works. "set" is not "works": a run once burned 75 minutes over six
+    exchanges because check_env reported GITHUB_TOKEN as set while GitHub was
+    answering 401 to every request.
+
+    Returns True if all keys are set (and, when live, all probes passed).
     """
     from dotenv import dotenv_values
     env = dotenv_values(ENV_PATH)
-    all_set = True
+    all_ok = True
     for k in keys or REQUIRED_ENV_KEYS:
         present = bool(env.get(k))
         print(f"{k}: {'set' if present else 'MISSING'}")
-        all_set = all_set and present
-    return all_set
+        all_ok = all_ok and present
+
+    if not live:
+        return all_ok
+
+    print("--- live checks ---")
+    for label, probe in _live_probes().items():
+        try:
+            ok, detail = probe()
+        except Exception as exc:                      # a probe must never abort the run
+            ok, detail = False, f"probe error: {type(exc).__name__}"
+        # Never print the credential itself — only the verdict and the reason.
+        print(f"{label}: {'valid' if ok else 'INVALID'}" + (f" ({detail})" if detail else ""))
+        all_ok = all_ok and ok
+    return all_ok
+
+
+def _live_probes() -> dict:
+    """Name -> callable returning (ok, detail). Each does one cheap request."""
+    import json as _json
+    import os as _os
+    import urllib.error
+    import urllib.request
+
+    load_env()
+
+    def _github() -> tuple[bool, str]:
+        token = _os.environ.get("GITHUB_TOKEN", "")
+        if not token:
+            return False, "GITHUB_TOKEN missing"
+        req = urllib.request.Request("https://api.github.com/user")
+        req.add_header("Authorization", f"Bearer {token}")
+        req.add_header("User-Agent", "lab-agent/1.0")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                login = _json.loads(resp.read()).get("login", "?")
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                return False, "401 — token expired or revoked; generate a new one"
+            return False, f"HTTP {exc.code}"
+        except Exception as exc:
+            return False, f"unreachable ({type(exc).__name__})"
+        return True, f"authenticated as {login}"
+
+    def _slack() -> tuple[bool, str]:
+        if not _os.environ.get("SLACK_BOT_TOKEN"):
+            return False, "SLACK_BOT_TOKEN missing"
+        from .slack import api
+        try:
+            body = api.api_get("auth.test", {})
+        except Exception as exc:
+            return False, str(exc).replace("auth.test: ", "")
+        return True, f"bot {body.get('user', '?')} in {body.get('team', '?')}"
+
+    def _labarchives() -> tuple[bool, str]:
+        from .sources.labarchives import adapter as la_adapter
+        try:
+            notebooks = la_adapter.LabArchivesAdapter("probe")._list_notebooks()
+        except Exception as exc:
+            return False, f"HMAC auth failed ({type(exc).__name__})"
+        return (True, f"{len(notebooks)} notebook(s) visible") if notebooks else (False, "no notebooks visible")
+
+    def _la_cookie() -> tuple[bool, str]:
+        cookie = _os.environ.get("LA_SESSION_COOKIE", "").strip()
+        if not cookie:
+            return False, "not set — run get_la_cookies.py (needed for figures/uploads)"
+        from .sources.labarchives.auth import cookies_still_valid
+        if cookies_still_valid(cookie):
+            return True, "web session live"
+        return False, "expired — run get_la_cookies.py"
+
+    return {
+        "GITHUB_TOKEN": _github,
+        "SLACK_BOT_TOKEN": _slack,
+        "LabArchives API (HMAC)": _labarchives,
+        "LA_SESSION_COOKIE": _la_cookie,
+    }
 
 
 _TABLE_ROW_RE = re.compile(r"^\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*$")

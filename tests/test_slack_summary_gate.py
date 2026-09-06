@@ -54,11 +54,43 @@ LabArchives: AI Agent / [UNSIGNED] demo_experiment
 """
 
 
-def _mkrun(summary: str | None) -> Path:
+SOURCES = (
+    "# Sources for demo_experiment\n\n"
+    "| Value or claim | Where in report | Extracted file | Source line |\n"
+    "|---|---|---|---|\n"
+    '| -29.84 dBm | Main Result | extracted_github.md | "measured -29.84 dBm" |\n'
+)
+
+# The brief template (Stage B default): no ToC, no Key Parameters table, no
+# Citations — headings state the finding instead.
+BRIEF_REPORT = """# [UNSIGNED] demo_experiment
+
+**Experiment:** demo_experiment
+**Report generated:** 2026-09-05
+
+---
+
+## What We Did
+
+We compared the Presto against a VNA on the spectrum analyser.
+
+---
+
+## Main Result: Presto and the VNA Agree
+
+The Presto tone read -29.84 dBm when -30 dBm was commanded.
+
+**Bottom line:** either source is trustworthy for setup work.
+"""
+
+
+def _mkrun(summary: str | None, report: str = REPORT, sources: str | None = SOURCES) -> Path:
     d = Path(tempfile.mkdtemp())
-    (d / "[UNSIGNED] demo_experiment.md").write_text(REPORT, encoding="utf-8")
+    (d / "[UNSIGNED] demo_experiment.md").write_text(report, encoding="utf-8")
     if summary is not None:
         (d / "slack_summary.md").write_text(summary, encoding="utf-8")
+    if sources is not None:
+        (d / "report_sources.md").write_text(sources, encoding="utf-8")
     return d
 
 
@@ -98,8 +130,43 @@ def test_shape_warnings() -> None:
     check("an over-long summary warns", any("too long" in w for w in warnings))
 
 
+def test_brief_template_is_accepted() -> None:
+    """Stage B: a report with no Key Parameters table must pass the gate.
+
+    The gate used to ERROR without that section, so it was silently re-added
+    twice against an explicit instruction to drop it.
+    """
+    errors, _ = _findings(_mkrun(SUMMARY, report=BRIEF_REPORT))
+    check("a brief report raises no Key Parameters error",
+          not any("Key Parameters" in e for e in errors))
+    check("a brief report raises no errors at all", errors == [])
+
+
+def test_sources_sidecar_required() -> None:
+    errors, _ = _findings(_mkrun(SUMMARY, report=BRIEF_REPORT, sources=None))
+    check("a missing report_sources.md is an ERROR",
+          any("report_sources" in e for e in errors))
+
+    header_only = (
+        "| Value or claim | Where in report |\n|---|---|\n"
+    )
+    _, warnings = _findings(_mkrun(SUMMARY, report=BRIEF_REPORT, sources=header_only))
+    check("a sidecar with no value rows warns",
+          any("report_sources" in w for w in warnings))
+
+
+def test_duplicate_key_parameters_still_caught() -> None:
+    doubled = REPORT + "\n## Key Parameters\n\n| a | b |\n|---|---|\n"
+    errors, _ = _findings(_mkrun(SUMMARY, report=doubled))
+    check("two Key Parameters sections are still an ERROR",
+          any("Key Parameters" in e and "2x" in e for e in errors))
+
+
 if __name__ == "__main__":
     test_missing_summary_is_an_error()
     test_good_summary_passes()
     test_shape_warnings()
+    test_brief_template_is_accepted()
+    test_sources_sidecar_required()
+    test_duplicate_key_parameters_still_caught()
     print(f"\ntest_slack_summary_gate: {PASSED} checks passed")

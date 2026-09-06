@@ -68,13 +68,15 @@ def handle_mention(event, say, logger):
 
 @app.event("message")
 def handle_dm(event, say, logger):
-    if event.get("bot_id") or event.get("subtype"):
-        return
     if event.get("channel_type") != "im":
+        return
+    # Ignores bot echoes and edits/joins, but lets a file upload through — see
+    # api.dm_event_text.
+    text = api.dm_event_text(event)
+    if text is None:
         return
 
     user       = event["user"]
-    text       = api.unwrap_slack_text(event["text"])
     channel    = event["channel"]
     current_ts = event["ts"]
     thread_ts  = event.get("thread_ts")
