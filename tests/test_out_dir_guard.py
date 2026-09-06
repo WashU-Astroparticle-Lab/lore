@@ -16,7 +16,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from lab_agent.cli.run_pipeline import (
-    _gh_identity, _guard_out_dir, _parse_args, _preflight_guard,
+    _GENERIC_FOLDER_NAMES, _gh_identity, _guard_out_dir, _la_pages_to_experiment_id,
+    _parse_args, _preflight_guard,
 )
 
 PASSED = 0
@@ -132,6 +133,28 @@ def test_preflight_fires_before_the_fetch() -> None:
     check("an unseen folder is allowed", True)
 
 
+def test_generic_folder_names_do_not_become_experiment_ids() -> None:
+    """A GitHub URL pointing at a container directory must not name the run.
+
+    Pointing at .../qpd_squat_jkid_run20260414/notebooks produced a run directory
+    literally called `outputs/notebooks/` holding a 50 MB duplicate of the
+    correctly named run, with a report titled "[UNSIGNED] notebooks".
+    """
+    for name in ("notebooks", "scripts", "data", "src", "analysis", "DAQ", "Main"):
+        check(f"{name!r} is recognised as a container name",
+              name.strip().lower() in _GENERIC_FOLDER_NAMES)
+
+    for name in ("presto_vna_spectrum_20260826", "qpd_squat_jkid_run20260414",
+                 "power_calibration_20260227"):
+        check(f"{name!r} is NOT treated as generic", name.lower() not in _GENERIC_FOLDER_NAMES)
+
+    pages = ["20260409 Cabling and Cooldown - SQUAT(LED), WashU QPD, (New) JKID5x5 (xray source)",
+             "20260413 SQUAT"]
+    derived = _la_pages_to_experiment_id(pages)
+    check("the LabArchives-derived fallback is informative",
+          derived == "20260409_cabling_cooldown_squat")
+
+
 def test_parse_args() -> None:
     pos, opts = _parse_args(["https://github.com/o/r/tree/x/y", "page a", "--experiment-id", "my_run"])
     check("positionals survive option parsing", pos == ["https://github.com/o/r/tree/x/y", "page a"])
@@ -157,5 +180,6 @@ if __name__ == "__main__":
     test_guard_blocks_the_real_collision()
     test_guard_escape_hatches()
     test_preflight_fires_before_the_fetch()
+    test_generic_folder_names_do_not_become_experiment_ids()
     test_parse_args()
     print(f"\ntest_out_dir_guard: {PASSED} checks passed")

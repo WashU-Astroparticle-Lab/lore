@@ -59,6 +59,12 @@ from ..sources import GitHubAdapter, LabArchivesAdapter
 from ..sources.github import parse_github_url
 from ..sources.labarchives.auth import cookies_still_valid
 
+# Folder names that describe a container rather than an experiment. A GitHub URL
+# pointing at one of these yields a useless experiment_id (see the override below).
+_GENERIC_FOLDER_NAMES = {"notebooks", "notebook", "scripts", "script", "src", "code",
+                         "data", "analysis", "analyses", "figures", "plots", "results",
+                         "output", "outputs", "daq", "main", "master"}
+
 _ID_STOPWORDS = {"and", "or", "the", "a", "an", "in", "to", "of", "for", "with",
                  "new", "at", "by", "on", "its", "is", "was", "are"}
 
@@ -370,12 +376,26 @@ def run(
         # given by the user), the folder name may be a generic subfolder like "notebooks".
         # Override the experiment ID with one derived from the LabArchives page names so
         # the report gets a meaningful name.
-        if discovered_urls and la_pages:
+        # Override the GitHub-derived id when it is uninformative. Two cases:
+        #  - the URL was auto-discovered from LabArchives content, so its folder
+        #    name was never chosen to name an experiment;
+        #  - the folder name is a generic container ("notebooks", "scripts", …),
+        #    which happens whenever a user points at a subdirectory of the real
+        #    experiment folder. That produced an entire run directory literally
+        #    named `outputs/notebooks/` — a 50 MB duplicate of the correctly named
+        #    run, with a report titled "[UNSIGNED] notebooks".
+        generic_name = config.experiment.id.strip().lower() in _GENERIC_FOLDER_NAMES
+        if la_pages and (discovered_urls or generic_name):
             la_id = _la_pages_to_experiment_id(la_pages)
+            why = "auto-discovered URL" if discovered_urls else f"generic folder name {config.experiment.id!r}"
             config = config.model_copy(
                 update={"experiment": config.experiment.model_copy(update={"id": la_id})}
             )
-            print(f"[runner] Overriding experiment_id to LabArchives-derived: {la_id!r}")
+            print(f"[runner] Overriding experiment_id to LabArchives-derived: {la_id!r} ({why})")
+        elif generic_name:
+            print(f"[runner] WARNING: experiment_id {config.experiment.id!r} is a generic folder "
+                  "name and there are no LabArchives pages to derive a better one. "
+                  "Pass --experiment-id <name> to avoid an unidentifiable run directory.")
         bundle = ExperimentBundle(
             root_dir=github_bundle.root_dir,
             config=config,
