@@ -180,6 +180,16 @@ def cmd_search(opts: dict) -> None:
     for h in hits[:limit]:
         text = " ".join(h["text"].split())
         print(f"  #{h['channel']} [{h['ts']}] {h['user']}: {text[:220]}")
+        if h.get("files"):
+            print(f"      ATTACHMENTS ({len(h['files'])}): {', '.join(h['files'])}")
+        for n in h.get("nearby", []):
+            tag = f" [+{len(n['files'])} file(s): {', '.join(n['files'])}]" if n["files"] else ""
+            print(f"      · nearby {n['user']}: {n['text']}{tag}")
+    if hits:
+        # The failure this guards against: a claim and the screenshots supporting
+        # it are separate messages, so the matched line alone reads as settled fact.
+        print("[slack] a matched line is not the whole story — check the nearby "
+              "messages and any attachments before concluding anything from it")
 
 
 COMMANDS = {

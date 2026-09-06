@@ -298,18 +298,35 @@ def search_history(query: str, limit_per_channel: int = 200, max_channels: int =
         return []
     channels, _ = list_channels()
     hits: list[dict] = []
+
+    def _brief(m: dict) -> dict:
+        return {
+            "user": m.get("user", "?"),
+            "text": " ".join(unwrap_slack_text(m.get("text", "")).split())[:160],
+            "files": [f.get("name", "file") for f in (m.get("files") or [])],
+        }
+
     for ch in [c for c in channels if c["is_member"]][:max_channels]:
         try:
             body = api_get("conversations.history",
                            {"channel": ch["id"], "limit": str(limit_per_channel)})
         except SlackError:
             continue  # one unreadable channel must not sink the search
-        for m in body.get("messages", []):
+        messages = body.get("messages", [])          # newest-first
+        for idx, m in enumerate(messages):
             text = unwrap_slack_text(m.get("text", ""))
             if needle in text.lower():
+                # Neighbours matter: a claim and the screenshots backing it are
+                # routinely separate messages, so a match shown alone reads as a
+                # bare assertion and invites concluding more than it supports.
+                neighbours = [_brief(messages[j]) for j in (idx + 1, idx - 1)
+                              if 0 <= j < len(messages)]
                 hits.append({
                     "channel": ch["name"], "channel_id": ch["id"],
                     "ts": m.get("ts", ""), "user": m.get("user", "?"), "text": text,
+                    # A message's meaning often lives in its attachments.
+                    "files": [f.get("name", "file") for f in (m.get("files") or [])],
+                    "nearby": neighbours,
                 })
     hits.sort(key=lambda h: h["ts"], reverse=True)
     return hits
