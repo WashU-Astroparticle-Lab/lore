@@ -15,7 +15,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lab_agent.cli.run_pipeline import _gh_identity, _guard_out_dir, _parse_args
+from lab_agent.cli.run_pipeline import (
+    _gh_identity, _guard_out_dir, _parse_args, _preflight_guard,
+)
 
 PASSED = 0
 
@@ -95,6 +97,41 @@ def test_guard_escape_hatches() -> None:
     check("unreadable metadata does not block a run", True)
 
 
+def test_preflight_fires_before_the_fetch() -> None:
+    """The late guard protects the data but only after the fetch is paid for.
+
+    In the real Aug 31 case that means ~35 s of fetching, and a Duo prompt if the
+    cookie had expired, on behalf of a run that is about to be refused.
+    """
+    root = Path(tempfile.mkdtemp())
+    prev = "https://github.com/o/r/tree/aaa/DAQ/presto_vna_spectrum_20260826"
+    now = "https://github.com/o/r/tree/bbb/DAQ/presto_vna_spectrum_20260826"
+    d = root / "presto_vna_spectrum_20260826"
+    d.mkdir()
+    (d / "metadata.json").write_text(
+        json.dumps({"github_url": prev, "la_pages": []}), encoding="utf-8"
+    )
+
+    try:
+        _preflight_guard(now, ["[Signed] presto_vna_spectrum_20260831 (copy)"], output_root=root)
+    except SystemExit as exc:
+        check("pre-flight refuses before any fetch happens", exc.code == 4)
+    else:
+        raise AssertionError("FAILED: pre-flight did not catch the collision")
+
+    _preflight_guard(now, [], output_root=root)
+    check("pre-flight allows a plain re-run at a newer commit", True)
+
+    _preflight_guard(now, ["different page"], output_root=root, force=True)
+    check("--force still bypasses the pre-flight", True)
+
+    _preflight_guard(None, ["some page"], output_root=root)
+    check("LabArchives-only runs skip the pre-flight (id not knowable yet)", True)
+
+    _preflight_guard("https://github.com/o/r/tree/aaa/DAQ/never_seen", ["x"], output_root=root)
+    check("an unseen folder is allowed", True)
+
+
 def test_parse_args() -> None:
     pos, opts = _parse_args(["https://github.com/o/r/tree/x/y", "page a", "--experiment-id", "my_run"])
     check("positionals survive option parsing", pos == ["https://github.com/o/r/tree/x/y", "page a"])
@@ -119,5 +156,6 @@ if __name__ == "__main__":
     test_guard_allows_plain_rerun()
     test_guard_blocks_the_real_collision()
     test_guard_escape_hatches()
+    test_preflight_fires_before_the_fetch()
     test_parse_args()
     print(f"\ntest_out_dir_guard: {PASSED} checks passed")

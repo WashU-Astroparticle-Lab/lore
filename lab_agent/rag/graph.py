@@ -172,7 +172,44 @@ async def _claude_code_llm_func(prompt, system_prompt=None, history_messages=Non
     text = out.decode("utf-8", errors="replace").strip()
     if not text:
         raise RuntimeError(f"claude -p returned nothing: {err.decode('utf-8', errors='replace')[:300]}")
+    if cli_error_message(text):
+        raise RuntimeError(
+            f"claude -p could not answer — {cli_error_message(text)}. "
+            "The knowledge graph's LLM runs on the Claude Code login; re-authenticate "
+            "(`claude` in a terminal) and retry."
+        )
     return text
+
+
+# `claude -p` reports auth/usage failures on STDOUT and still exits 0, so the
+# error text comes back looking exactly like a model answer. LightRAG then feeds
+# "Failed to authenticate. API Error: 401 …" into keyword extraction, logs a JSON
+# repair warning, and returns an empty answer — the caller sees a thin result and
+# no sign that the system is broken. Detect it and fail loudly instead.
+_CLI_ERROR_MARKERS = (
+    "failed to authenticate",
+    "oauth access token has expired",
+    "re-authenticate to continue",
+    "invalid api key",
+    "credit balance is too low",
+    "usage limit reached",
+)
+
+
+def cli_error_message(text: str) -> str | None:
+    """Return the CLI error if *text* is an error report rather than an answer.
+
+    Only short outputs are considered: a genuine answer that happens to quote one
+    of these phrases will be long, so length keeps the check from firing on real
+    content.
+    """
+    if len(text) > 600:
+        return None
+    low = text.lower()
+    for marker in _CLI_ERROR_MARKERS:
+        if marker in low:
+            return text.strip().splitlines()[0][:200]
+    return None
 
 
 class _LightRAGBackend:

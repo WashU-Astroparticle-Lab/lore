@@ -69,6 +69,32 @@ def test_available_true_with_injected_backend():
     assert KnowledgeGraph("kb_unused", backend=FakeBackend()).available() is True
 
 
+def test_cli_error_detection():
+    """`claude -p` reports auth failure on stdout with exit 0.
+
+    Found live on 2026-09-05: query_kb returned "Failed to authenticate. API
+    Error: 401 OAuth access token has expired." as if it were the model's answer,
+    LightRAG fed it into keyword extraction, and the user got an empty answer with
+    no indication the graph's LLM was down.
+    """
+    from lab_agent.rag.graph import cli_error_message
+
+    real = "Failed to authenticate. API Error: 401 OAuth access token has expired. Re-authenticate to continue."
+    assert cli_error_message(real), "did not detect the real auth failure"
+    assert "Failed to authenticate" in cli_error_message(real)
+
+    for txt in ("Invalid API key", "Credit balance is too low", "Usage limit reached"):
+        assert cli_error_message(txt), f"missed: {txt}"
+
+    assert cli_error_message("The QPD devices were measured at 2.7-2.9 GHz.") is None
+    assert cli_error_message("") is None
+
+    # A long, genuine answer that mentions authentication must not be swallowed.
+    long_answer = ("The cryostat wiring notes discuss how to authenticate to the "
+                   "instrument server. " * 20)
+    assert cli_error_message(long_answer) is None, "false positive on a long answer"
+
+
 if __name__ == "__main__":
     import sys
 

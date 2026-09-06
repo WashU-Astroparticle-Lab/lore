@@ -256,6 +256,34 @@ def _guard_out_dir(
     sys.exit(4)
 
 
+def _preflight_guard(
+    github_url: str | None,
+    la_pages: list[str],
+    *,
+    reuse: bool = False,
+    force: bool = False,
+    output_root: Path | None = None,
+) -> None:
+    """Refuse an obvious collision *before* spending a fetch on it.
+
+    The authoritative guard runs after ``summarize()``, because that is where the
+    experiment id is finally known — but by then the fetch is paid for, and an
+    expired cookie would have prompted for Duo on behalf of a run about to be
+    refused. The GitHub folder name is knowable from the URL alone, so the common
+    case is caught in milliseconds; the late guard stays as the backstop for the
+    LabArchives-derived id and for any case where the derived id differs from the
+    folder name.
+    """
+    if not github_url:
+        return
+    probable = github_url.rstrip("/").rsplit("/", 1)[-1]
+    if not probable:
+        return
+    candidate = (Path(output_root) if output_root else Path(OUTPUT_ROOT)) / probable
+    if (candidate / "metadata.json").exists():
+        _guard_out_dir(candidate, github_url, la_pages, reuse=reuse, force=force)
+
+
 def run(
     github_url: str | None,
     la_pages: list[str],
@@ -273,6 +301,10 @@ def run(
 
     def _mark(label: str) -> None:
         _marks.append((label, time.perf_counter()))
+
+    # 0a. Pre-flight collision check — see _preflight_guard.
+    if not experiment_id and not out_dir_override:
+        _preflight_guard(github_url, la_pages, reuse=reuse, force=force)
 
     # 0. Fail fast on an expired web session BEFORE any fetching. Previously an
     # expired cookie only surfaced after the full text+image fetch, forcing a
