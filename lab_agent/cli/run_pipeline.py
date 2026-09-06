@@ -5,6 +5,14 @@ Usage:
     python run.py "<github_url>" "<la_page_1>" "<la_page_2>" ...   # full pipeline
     python run.py "<la_page_1>" "<la_page_2>" ...                   # LabArchives-only
 
+Options:
+    --experiment-id NAME  write to outputs/NAME/ instead of the derived id. Use this
+                          when a run's code lives in another run's GitHub folder, so
+                          it gets its own directory instead of overwriting that run.
+    --out-dir PATH        explicit output directory (overrides --experiment-id)
+    --reuse               write into an existing directory that holds different inputs
+    --force               skip the collision check entirely
+
 The GitHub URL is optional. If omitted, the pipeline fetches LabArchives pages first
 and then scans their content for embedded GitHub links — if any are found, they are
 fetched automatically. If none are found, the pipeline runs in LabArchives-only mode.
@@ -182,7 +190,81 @@ def _fetch_wiring_diagram() -> str | None:
     return md
 
 
-def run(github_url: str | None, la_pages: list[str]) -> str:
+_re_gh = re.compile(
+    r"github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/(?:tree|blob)/[^/]+(/.*)?)?/?$"
+)
+
+
+def _gh_identity(url: str | None) -> str:
+    """Identity of a GitHub URL ignoring the ref, so re-fetching the same
+    experiment at a newer commit is not mistaken for a different experiment.
+
+    ``.../owner/repo/tree/<sha>/DAQ/foo`` -> ``owner/repo/DAQ/foo``
+    """
+    if not url:
+        return ""
+    m = _re_gh.search(url.strip())
+    if not m:
+        return url.strip()
+    owner, repo, subpath = m.group(1), m.group(2), (m.group(3) or "").strip("/")
+    return f"{owner}/{repo}/{subpath}".rstrip("/")
+
+
+def _guard_out_dir(
+    out_dir: Path,
+    github_url: str | None,
+    la_pages: list[str],
+    *,
+    reuse: bool = False,
+    force: bool = False,
+) -> None:
+    """Refuse to write a *different* experiment into an existing output directory.
+
+    The experiment id is derived from the GitHub folder name, so two experiments
+    that share a code folder (e.g. a follow-up run whose notebook lives in the
+    previous run's directory) silently collide and the second overwrites the
+    first's metadata.json, destroying its provenance. Catch that here.
+    """
+    meta_path = out_dir / "metadata.json"
+    if force or not meta_path.exists():
+        return
+    try:
+        prev = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return  # unreadable metadata is not a reason to block a run
+
+    prev_gh, now_gh = _gh_identity(prev.get("github_url")), _gh_identity(github_url)
+    prev_la = sorted(p.strip() for p in (prev.get("la_pages") or []))
+    now_la = sorted(p.strip() for p in la_pages)
+    if prev_gh == now_gh and prev_la == now_la:
+        return  # same experiment — a plain re-run, which is fine
+
+    if reuse:
+        print(f"[runner] --reuse: writing into existing {out_dir.name}/ despite different inputs.")
+        return
+
+    print(
+        f"[runner] REFUSING to overwrite {out_dir.name}/ — it holds a different experiment.\n"
+        f"  existing: github={prev_gh or '(none)'} la_pages={prev_la or '(none)'}\n"
+        f"  this run: github={now_gh or '(none)'} la_pages={now_la or '(none)'}\n"
+        "Writing here would overwrite that run's metadata.json and its provenance.\n"
+        "Choose one:\n"
+        "  --experiment-id <name>   write to a fresh outputs/<name>/ (recommended)\n"
+        "  --reuse                  deliberately add to the existing directory\n"
+        "  --force                  skip this check entirely"
+    )
+    sys.exit(4)
+
+
+def run(
+    github_url: str | None,
+    la_pages: list[str],
+    experiment_id: str | None = None,
+    out_dir_override: Path | None = None,
+    *,
+    reuse: bool = False,
+    force: bool = False,
+) -> str:
     # Wall-clock stage timing (goal: keep the fetch layer "timely"). Marks are
     # consecutive; each stage duration is the gap between adjacent marks. The
     # summary is printed and stored in metadata.json under "fetch_timings_sec".
@@ -307,7 +389,15 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
     # 3. Extract structured content
     summary = summarize_bundle(bundle)
     _mark("summarize")
-    out_dir = Path(OUTPUT_ROOT) / summary.output_dirname
+    # The experiment id normally comes from the GitHub folder (or the LabArchives
+    # pages in LA-only mode). An explicit --experiment-id/--out-dir wins, so a
+    # follow-up run whose code lives in a previous run's folder can be given its
+    # own directory instead of overwriting that run.
+    dirname = experiment_id or summary.output_dirname
+    out_dir = Path(out_dir_override) if out_dir_override else Path(OUTPUT_ROOT) / dirname
+    if experiment_id or out_dir_override:
+        print(f"[runner] Output directory overridden: {out_dir}")
+    _guard_out_dir(out_dir, github_url, la_pages, reuse=reuse, force=force)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 4. Save notebook content — full serialized cells (code + outputs), one
@@ -429,7 +519,7 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
     )
     files_written = sorted(p.name for p in out_dir.iterdir() if p.is_file())
     metadata = {
-        "experiment_id": summary.output_dirname,
+        "experiment_id": out_dir.name,
         "la_pages": la_pages,
         "github_url": github_url or "",
         "discovered_github_urls": discovered_urls,
@@ -453,7 +543,7 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
         resource=github_url or "",
         source_ref=gh_adapter.commit_sha if gh_adapter else None,
         timestamp=gh_adapter.commit_date if gh_adapter else None,
-        tags=[summary.output_dirname],
+        tags=[out_dir.name],
     )
     print(f"[runner] Wrote OKF frontmatter + index.md")
 
@@ -464,16 +554,58 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
     return str(out_dir)
 
 
+def _parse_args(argv: list[str]) -> tuple[list[str], dict]:
+    """Split argv into positionals and options.
+
+    Options: --experiment-id NAME, --out-dir PATH, --reuse, --force
+    (``--opt=value`` is accepted too).
+    """
+    opts: dict = {"experiment_id": None, "out_dir": None, "reuse": False, "force": False}
+    positional: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        key, _, inline = arg.partition("=")
+        if key in ("--experiment-id", "--out-dir"):
+            field = "experiment_id" if key == "--experiment-id" else "out_dir"
+            if inline:
+                opts[field] = inline
+                i += 1
+            elif i + 1 < len(argv):
+                opts[field] = argv[i + 1]
+                i += 2
+            else:
+                print(f"[runner] {key} needs a value")
+                sys.exit(1)
+            continue
+        if key in ("--reuse", "--force"):
+            opts[key.lstrip("-")] = True
+            i += 1
+            continue
+        positional.append(arg)
+        i += 1
+    return positional, opts
+
+
 def main() -> None:
-    args = sys.argv[1:]
-    if not args:
+    positional, opts = _parse_args(sys.argv[1:])
+    if not positional:
         print(__doc__)
         sys.exit(1)
+    out_dir_override = Path(opts["out_dir"]) if opts["out_dir"] else None
     # First arg is a GitHub URL if it starts with http and contains github.com
-    if args[0].startswith("http") and "github.com" in args[0]:
-        run(args[0], args[1:])
+    if positional[0].startswith("http") and "github.com" in positional[0]:
+        github_url, la_pages = positional[0], positional[1:]
     else:
-        run(None, args)
+        github_url, la_pages = None, positional
+    run(
+        github_url,
+        la_pages,
+        experiment_id=opts["experiment_id"],
+        out_dir_override=out_dir_override,
+        reuse=opts["reuse"],
+        force=opts["force"],
+    )
 
 
 if __name__ == "__main__":

@@ -166,6 +166,21 @@ def check(out_dir: Path) -> list[Finding]:
                 err(f"{report.name}: Key Parameters section appears {len(kp)}x (must be once)")
             if "| source" not in text.lower():
                 warn(f"{report.name}: Key Parameters table appears to lack a 'Source' column")
+        # The Slack summary is posted to the lab verbatim and is the only part
+        # most people read, so it must exist and be reviewable (Stage A1). The
+        # critic checks its numbers and hedging against the report; here we only
+        # confirm it is present and plausible.
+        if not dr_only:
+            summary_path = out_dir / "slack_summary.md"
+            summary_text = _read(summary_path) or ""
+            if not summary_text.strip():
+                err("slack_summary.md missing or empty (report-writer must emit it)")
+            else:
+                if "<img" in summary_text or "<table" in summary_text:
+                    warn("slack_summary.md contains HTML — Slack renders it literally")
+                if len(summary_text) > 3000:
+                    warn(f"slack_summary.md is {len(summary_text)} chars — too long for a Slack post")
+
         # Every embedded image resolves to a file in out_dir (catches wrong-folder-prefix bug).
         # Capture to the last ')' on the line so filenames containing '(', ')' or spaces
         # (e.g. 'image (1).png') survive; then strip an optional "title".

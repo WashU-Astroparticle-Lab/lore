@@ -46,6 +46,12 @@ def _good_dir(tmp: str) -> Path:
     (d / "github_images").mkdir()
     (d / "github_images" / "p.png").write_bytes(b"x")
     (d / "[UNSIGNED] exp_x.md").write_text(_GOOD_REPORT, encoding="utf-8")
+    # Stage A1: report-writer emits the Slack message alongside the report, and
+    # the gate requires it — a complete run directory now includes one.
+    (d / "slack_summary.md").write_text(
+        "*exp_x* is in LabArchives.\n\n- One finding, consistent with the data\n",
+        encoding="utf-8",
+    )
     return d
 
 

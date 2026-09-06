@@ -508,10 +508,17 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
           6. Post: "Writing report..." then run Phases B, C, D per CLAUDE.md.
           7. After saving the report file:
              Post: "Report written. Uploading to LabArchives..."
-          8. After upload completes, write your final summary as normal text output
-             (do NOT post it yourself — the system delivers your final output automatically).
-             Include: what experiment was reported, key findings (2-3 bullets), confirmation
-             it's live in LabArchives under the upload folder, tagging <@{user}>.
+          8. After upload completes, your final summary is the CONTENTS OF
+             <out_dir>/slack_summary.md, verbatim — the report-writer wrote it from the
+             report and the critic checked its numbers and hedging against the report.
+             Read that file and emit it as your final text output (do NOT post it
+             yourself — the system delivers your final output automatically), adding
+             only <@{user}> and a one-line timing summary.
+             Do NOT compose your own summary from memory of what the subagents
+             reported: every factual error that has reached the lab came from that
+             (a number paired with the wrong frequency; a "confirming" the critic had
+             just removed from the report). If slack_summary.md is missing, re-spawn
+             the report-writer rather than writing prose yourself.
 
         Project root: {PROJECT_ROOT}
     """).strip()

@@ -41,6 +41,7 @@ python run.py "<la_page_name_1>" "<la_page_name_2>"
 ```
 
 - LabArchives inputs: page titles (case-insensitive), raw base64 tree_ids, or notebook URLs.
+- **`--experiment-id <name>`** — pass this when the run's notebook lives inside *another* experiment's GitHub folder (a follow-up run committed alongside the original). The id is derived from that folder name, so without the flag this run writes into the earlier experiment's directory and overwrites its `metadata.json`. If you skip it, `run.py` now refuses with exit 4 and tells you what collided — give it a fresh `--experiment-id` rather than reaching for `--force`.
 - If no GitHub URL is given and a GitHub link is found inside a LabArchives page, it is fetched automatically.
 - Output lands in `outputs/<experiment_id>/`: `notebooks.md`, `labarchives.md`, `data_summaries.md`, `dependencies.md`, `github_images/` + `github_images.md`, `labarchives_images/` + `labarchives_images.md`, and (only if requested) `dr_conditions.md`.
 
@@ -151,7 +152,14 @@ cd $PROJECT_ROOT
 python upload_to_labarchives.py outputs/<experiment_id>
 ```
 
-This finds the **$UPLOAD_FOLDER** folder in the **$PRIMARY_NOTEBOOK** notebook, creates a page named after the experiment, posts the report as rendered HTML, and attaches the raw `.md`. If the upload fails, report the error — do not silently skip it.
+This finds the **$UPLOAD_FOLDER** folder in the **$PRIMARY_NOTEBOOK** notebook, posts the report as rendered HTML, and attaches the raw `.md`. If a page with that title already exists it adds a **revision entry to that page** rather than creating a duplicate. If the upload fails, report the error — do not silently skip it.
+
+Options when you need them:
+- `--report-file "<name>.md"` — **required whenever the directory holds more than one report** (e.g. a full report and a plain-language variant). Without it the newest by mtime wins, which is a coin flip.
+- `--page-title "<title>"` — for a variant that should live on its own page (e.g. `[UNSIGNED] <experiment_id>_simple`).
+- `--new-page` — force a fresh page. Rarely correct; the default already avoids duplicates.
+
+The command prints the notebook URL and the folder/page it wrote to, and records the same under `labarchives_upload` in `metadata.json`. **Cite that** when telling the user where the report is. LabArchives web page IDs do not map to API tree_ids, so there is no per-page deep link — give the notebook URL plus "$UPLOAD_FOLDER / \<page title\>". Never invent or abbreviate a URL.
 
 **After a successful upload, log latency:**
 
@@ -170,6 +178,24 @@ python -m lab_agent.cli.record_knowledge outputs/<experiment_id>
 ```
 
 Distils a per-experiment concept into `knowledge/experiments/<id>.md`. When a human later signs off, re-run with `--sign` to promote it to a high-trust exemplar. The knowledge bundle is a finding aid only — never a source of new report numbers.
+
+## Step 5 — post the Slack summary (do NOT write your own)
+
+`report-writer` produced `<out_dir>/slack_summary.md`, and the critic checked its numbers and hedging against the report. **Post that file's contents as your final message, verbatim**, adding only the `<@user>` tag and the one-line timing summary.
+
+Do not compose a fresh summary from what the subagents told you. Every factual defect that has reached the lab came from that habit — a report saying "+0.165 dB at 6.9 GHz, −0.139 dB at 6.44 GHz" became "−0.139 dB at 6.9 GHz and +0.165 dB at 6.44 GHz" in the Slack message, and a report whose "confirming" the critic had just removed was announced as "confirmed". The report is gated; freehand prose about it is not.
+
+If `slack_summary.md` is missing, that is an `[ERROR]` from the structural gate — re-spawn `report-writer` rather than writing one yourself.
+
+## Handling a user-requested revision (after the report exists)
+
+When the user asks for a change to a report that is already written or uploaded ("make it shorter", "drop the key parameters", "the goal was really X", "use my photo"), **do not edit or rewrite the report yourself.** That path bypasses the critic entirely, and rewriting from the previous draft violates the "never read `[UNSIGNED]` files as source material" rule in `docs/report_style_guide.md`.
+
+1. Spawn **`report-writer`** with: `<out_dir> = <path>. User revision — <the user's request, verbatim>.` It rebuilds from the extracted files, not from the old draft.
+2. Re-spawn **`critic`**, and handle its verdict exactly as in Phase D.
+3. Re-run the structural gate, then re-upload with `python upload_to_labarchives.py outputs/<experiment_id>` — which now revises the existing page instead of creating a duplicate.
+
+If the user wants a **separate** document rather than a replacement (e.g. "make a simpler version *as well*"), pass the target filename to `report-writer` and upload it with `--report-file` and its own `--page-title`.
 
 ## Known limitation
 Web app page IDs (e.g. `11400322`) do **not** map to API tree_ids. Pass page titles or base64 tree_ids instead.

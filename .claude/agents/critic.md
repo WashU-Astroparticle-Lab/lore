@@ -19,6 +19,11 @@ Read the `[UNSIGNED]` report, all `extracted_*.md`, and `connections.md` in `<ou
 7. The Key Findings section does not restate sentences that already appear in Results.
 8. **No dead link is cited as a source.** If `link_check.md` exists in `<out_dir>`, the report cites no URL marked `not_found` or `unreachable` there.
 9. **Citations resolve.** If the report has a `# Citations` section, every `[n]` marker in the body resolves to a numbered entry, and every Key Parameters row carries a citation.
+10. **The Slack summary matches the report.** `<out_dir>/slack_summary.md` must exist. Check it line by line against the report — it is posted to the lab verbatim and is the only part most readers see, so it gets the same scrutiny as the report itself:
+    - every number in it appears in the report with the **same value, same units, and attached to the same label** (frequency, instrument, device, power level). A number paired with the wrong label is a FAIL, not a nitpick — e.g. reporting the 6.9 GHz offset against 6.44 GHz.
+    - every claim carries **at least as much hedging as the report**. If the report says "consistent with", the summary saying "confirms"/"confirmed" is a FAIL. This applies even when the report earned that hedge through a revision.
+    - no claim appears that is absent from the report.
+    Quote the offending summary line and the report line it contradicts.
 
 ## Checklist (DR-only reports — when the spawning prompt says so)
 
