@@ -50,7 +50,7 @@ You are a Claude Code agent with access to Slack and LabArchives. You can use th
 
 You can call the Slack API directly using the bot token. Available scopes include:
 - `channels:history` / `groups:history` / `im:history` — read message history from channels and DMs
-- `channels:read` — list public channels. NOTE: `groups:read` is NOT currently granted, so `conversations.list` fails with `missing_scope`; the `channels` command will say so. Ask the user to name the channel until that scope is added.
+- `channels:read` — list public channels. `groups:read` (private channels) is NOT granted, so the `channels` command lists public channels only and prints a note; ask the user only when the target is a private channel.
 - `search:read` — search messages across the workspace
 
 **When to use it:**

@@ -256,18 +256,31 @@ def file_is_shared(file_id: str, channel: str) -> bool:
     return channel in shared
 
 
-def list_channels(limit: int = 200) -> list[dict]:
-    """Channels the bot can post to (public + private it is a member of)."""
-    body = api_get("conversations.list", {
-        "types": "public_channel,private_channel",
-        "exclude_archived": "true",
-        "limit": str(limit),
-    })
-    return [
+def list_channels(limit: int = 200) -> tuple[list[dict], str | None]:
+    """Channels the bot can post to. Returns (channels, warning).
+
+    Listing private channels needs ``groups:read``; listing public ones needs
+    ``channels:read``. Slack rejects the WHOLE call with ``missing_scope`` if any
+    requested type is not granted — so asking for both at once turns a missing
+    private-channel scope into "no channels at all". Fall back to public-only and
+    say what is missing, rather than returning nothing.
+    """
+    params = {"exclude_archived": "true", "limit": str(limit)}
+    warning = None
+    try:
+        body = api_get("conversations.list", {**params, "types": "public_channel,private_channel"})
+    except SlackError as exc:
+        if "missing_scope" not in str(exc):
+            raise
+        body = api_get("conversations.list", {**params, "types": "public_channel"})
+        warning = ("private channels are not listed — the bot token lacks 'groups:read'. "
+                   "Public channels below are complete; name a private channel explicitly to post to it.")
+    channels = [
         {"id": c["id"], "name": c.get("name", ""), "is_member": bool(c.get("is_member")),
          "is_private": bool(c.get("is_private"))}
         for c in body.get("channels", [])
     ]
+    return channels, warning
 
 
 def post_message(channel: str, thread_ts: str | None, text: str) -> None:

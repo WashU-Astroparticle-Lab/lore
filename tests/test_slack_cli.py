@@ -126,6 +126,61 @@ def test_upload_rejects_empty_file() -> None:
         raise AssertionError("FAILED: empty file was uploaded")
 
 
+def _patch_urlopen_sequence(bodies: list[dict]):
+    """Return each body in turn; restores the original on call."""
+    original = urllib.request.urlopen
+    queue = list(bodies)
+
+    def fake(*a, **k):
+        return _FakeResponse(json.dumps(queue.pop(0)).encode())
+
+    urllib.request.urlopen = fake
+    return lambda: setattr(urllib.request, "urlopen", original)
+
+
+def test_list_channels_falls_back_to_public() -> None:
+    """Slack rejects the whole conversations.list call if ANY requested type
+    lacks scope, so asking for public+private turns a missing 'groups:read' into
+    "no channels at all" — and then the agent asks the user which channel, four
+    times, with the list one command away."""
+    restore = _patch_urlopen_sequence([
+        {"ok": False, "error": "missing_scope", "needed": "groups:read", "provided": "channels:read"},
+        {"ok": True, "channels": [
+            {"id": "C1", "name": "data_analysis", "is_member": True, "is_private": False},
+        ]},
+    ])
+    try:
+        channels, warning = api.list_channels()
+        check("public channels still come back without groups:read", len(channels) == 1)
+        check("the fallback names the missing scope", warning and "groups:read" in warning)
+    finally:
+        restore()
+
+    restore = _patch_urlopen_sequence([
+        {"ok": True, "channels": [
+            {"id": "C1", "name": "pub", "is_member": True, "is_private": False},
+            {"id": "C2", "name": "priv", "is_member": True, "is_private": True},
+        ]},
+    ])
+    try:
+        channels, warning = api.list_channels()
+        check("with full scope both types are listed", len(channels) == 2)
+        check("no warning when nothing was skipped", warning is None)
+    finally:
+        restore()
+
+    # A non-scope failure must still surface rather than being swallowed.
+    restore = _patch_urlopen_sequence([{"ok": False, "error": "ratelimited"}])
+    try:
+        api.list_channels()
+    except api.SlackError as exc:
+        check("unrelated failures still raise", "ratelimited" in str(exc))
+    else:
+        raise AssertionError("FAILED: swallowed a non-scope error")
+    finally:
+        restore()
+
+
 def test_dm_event_text() -> None:
     check("plain text wakes the bot", api.dm_event_text({"text": "hello"}) == "hello")
     check("bot echoes are ignored", api.dm_event_text({"text": "hi", "bot_id": "B1"}) is None)
@@ -152,5 +207,6 @@ if __name__ == "__main__":
     test_cli_parsing()
     test_api_raises_on_not_ok()
     test_upload_rejects_empty_file()
+    test_list_channels_falls_back_to_public()
     test_dm_event_text()
     print(f"\ntest_slack_cli: {PASSED} checks passed")

@@ -20,7 +20,7 @@ cd $PROJECT_ROOT
 python -m lab_agent.cli.slack channels --filter <guess>   # which channels can I post to?
 ```
 
-- **Offer the channel list with the draft.** Do not send a draft and then ask "which channel?" as a separate turn — that question was asked four times in one thread while the list was one command away. If `channels` fails with `missing_scope`, say so once and ask the user to name the channel instead.
+- **Offer the channel list with the draft.** Do not send a draft and then ask "which channel?" as a separate turn — that question was asked four times in one thread while the list was one command away. If the bot token lacks `groups:read`, the command still returns every **public** channel and prints a note saying private ones were skipped; use what it returns and ask only about a private channel.
 - **Find the figures now**, in the experiment's `outputs/<id>/` directory, and name them in the draft.
 - **Get the LabArchives link from `metadata.json`** (`labarchives_upload.notebook_url` plus folder/page) — never construct, shorten, or elide a URL. A fabricated GitHub link in one draft 404'd for the whole lab, and private repos 404 for anyone outside them anyway, so prefer the LabArchives location.
 

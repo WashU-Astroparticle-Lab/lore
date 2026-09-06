@@ -152,12 +152,14 @@ def cmd_read_thread(opts: dict) -> None:
 
 def cmd_channels(opts: dict) -> None:
     try:
-        channels = api.list_channels()
+        channels, warning = api.list_channels()
     except api.SlackError as exc:
         _die(f"channels failed: {exc}", 2)
     needle = (opts.get("filter") or "").lower()
     rows = [c for c in channels if needle in c["name"].lower()]
     rows.sort(key=lambda c: (not c["is_member"], c["name"]))
+    if warning:
+        print(f"[slack] NOTE: {warning}")
     print(f"[slack] {len(rows)} channel(s); the bot can only post where is_member=True")
     for c in rows:
         mark = "member" if c["is_member"] else "  --  "
