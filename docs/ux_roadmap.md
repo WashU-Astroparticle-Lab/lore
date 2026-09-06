@@ -16,13 +16,29 @@ covers *usability and the correctness of what actually reaches the human*).
 | D — interaction contract | **done** |
 | E — Q&A routing | **done** (E1); E2 cookie lifetime still open |
 
-Open follow-ups, both needing something outside the repo:
-- **Slack scope:** `conversations.list` returns `missing_scope` — the bot token has
-  `channels:read` but not `groups:read`, so `lab_agent.cli.slack channels` cannot list
-  channels yet. One scope to add in the Slack app config, then reinstall the app.
+Open follow-ups:
 - **E2 cookie lifetime:** `LA_SESSION_COOKIE` still expires inside a working session
   (twice in 30 minutes on Aug 31). Self-refresh handles it, but each refresh costs a Duo
   tap when off school wifi. Worth measuring the real TTL before designing around it.
+- **Not yet verified end-to-end** (each needs a live run or the user typing): A3 page
+  reuse, A4 user-revision path, D1 intake and D3 thread read-back in a live session,
+  D4 file-upload wake (needs the listener restarted), Slack `post`/`upload` against the
+  real workspace.
+- **Phase D is non-deterministic.** Three critic runs over near-identical content:
+  items 1 and 5 fired consistently and item 10 discriminated correctly, but items 2 and
+  9 were flaky. A single critique pass can miss what a rerun catches. Argues for moving
+  more coverage into the deterministic gate.
+
+Resolved after the status table was first written:
+- **Slack `groups:read` is NOT needed.** `list_channels` was asking for public+private in
+  one call, and Slack rejects the whole call if any requested type lacks scope — so a
+  missing private-channel scope returned nothing at all. It now falls back to
+  public-only with a note (12 channels list fine today). Granting `groups:read` would
+  additionally list private channels; it is a nice-to-have.
+- **`search.messages` never worked on a bot token** (`not_allowed_token_type` — it needs a
+  USER token), so the "search Slack history" step of the resolution order in CLAUDE.md
+  had always silently failed. Replaced by `cli.slack search`, which greps the history of
+  channels the bot is in.
 
 ---
 
