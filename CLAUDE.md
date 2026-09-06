@@ -51,7 +51,7 @@ You are a Claude Code agent with access to Slack and LabArchives. You can use th
 You can call the Slack API directly using the bot token. Available scopes include:
 - `channels:history` / `groups:history` / `im:history` — read message history from channels and DMs
 - `channels:read` — list public channels. `groups:read` (private channels) is NOT granted, so the `channels` command lists public channels only and prints a note; ask the user only when the target is a private channel.
-- `search:read` — search messages across the workspace
+- **No `search:read`** — `search.messages` needs a USER token and answers `not_allowed_token_type` for a bot. Use `cli.slack search` instead, which greps the history of channels the bot is in.
 
 **When to use it:**
 - User gives a vague reference ("the KID sweep from last Tuesday", "the measurement Axel posted about") → search Slack history for a GitHub URL, LabArchives page name, or experiment context
@@ -72,10 +72,10 @@ python -m lab_agent.cli.slack channels    [--filter <substring>]
 
 Every command **verifies by reading back** what it did and exits non-zero if it cannot. Exit 0 means delivered *and confirmed*. Never tell the user something was sent or attached unless the command exited 0 — `ok: true` from a raw API call is not proof, and announcing unsent images cost four round-trips in one real thread.
 
-For anything the CLI does not cover (e.g. `search.messages`), you may call the API directly — but use `lab_agent.slack.api.api_get` / `api_post`, which raise on `ok: false` instead of failing silently:
+For anything the CLI does not cover, you may call the API directly — but use `lab_agent.slack.api.api_get` / `api_post`, which raise on `ok: false` instead of failing silently:
 
 ```bash
-python -c "from lab_agent.slack.api import api_get; print(api_get('search.messages', {'query': 'KID sweep github.com', 'count': '5'}))"
+python -c "from lab_agent.slack.api import api_get; print(api_get('conversations.info', {'channel': 'C123'}))"
 ```
 
 ### LabArchives (already fully wired up)
@@ -87,7 +87,7 @@ You can search and read LabArchives pages directly via the `lab_agent.sources.la
 
 **Resolution order for ambiguous requests:**
 1. Query the knowledge graph: `python -m lab_agent.cli.query_kb "<the request>"` — a LightRAG graph over **all crawled LabArchives pages + past reports** (local; no cookies). It falls back to keyword search if the graph isn't built.
-2. Search Slack history for relevant links or context
+2. Search Slack history: `python -m lab_agent.cli.slack search --query "<terms>"` (channels the bot is in; there is no workspace-wide search on a bot token)
 3. Search LabArchives by approximate page title
 4. Only ask the user if all three fail
 
@@ -115,7 +115,7 @@ All run from `$PROJECT_ROOT`.
 | Zoom/crop a figure | `python -m lab_agent.cli.view_figure "<path>" [--crop X0 Y0 X1 Y1] [--scale 2]` |
 | Resolution regression check | `python -m lab_agent.cli.eval_qa` |
 | Refresh LabArchives cookies | `python get_la_cookies.py` |
-| Slack (post/upload/read/channels) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above |
+| Slack (post/upload/read-thread/channels/search) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above |
 | DR conditions | `python run_dr.py "YYYY-MM-DD" [--hours N]` |
 
 ## Known limitation

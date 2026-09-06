@@ -6,6 +6,7 @@ Slack from the pipeline — the ONE supported way for an agent to talk to Slack.
                                               [--comment-file note.txt] [--title "..."]
     python -m lab_agent.cli.slack read-thread --channel C123 --thread TS [--limit 50]
     python -m lab_agent.cli.slack channels    [--filter kid]
+    python -m lab_agent.cli.slack search      --query "presto vna" [--limit 20]
 
 Why this exists: every session used to hand-roll these calls as `python -c "..."`
 one-liners and got them wrong in a different way each time — backticks in the
@@ -167,11 +168,26 @@ def cmd_channels(opts: dict) -> None:
         print(f"  {mark}  {kind}  #{c['name']}  ({c['id']})")
 
 
+def cmd_search(opts: dict) -> None:
+    query = opts.get("query") or _die('search needs --query "<text>"')
+    try:
+        hits = api.search_history(query)
+    except api.SlackError as exc:
+        _die(f"search failed: {exc}", 2)
+    limit = int(opts.get("limit") or 20)
+    print(f"[slack] {len(hits)} message(s) containing {query!r} "
+          "(channels the bot is in; Slack's workspace search needs a user token)")
+    for h in hits[:limit]:
+        text = " ".join(h["text"].split())
+        print(f"  #{h['channel']} [{h['ts']}] {h['user']}: {text[:220]}")
+
+
 COMMANDS = {
     "post": cmd_post,
     "upload": cmd_upload,
     "read-thread": cmd_read_thread,
     "channels": cmd_channels,
+    "search": cmd_search,
 }
 
 

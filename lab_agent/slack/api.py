@@ -283,6 +283,38 @@ def list_channels(limit: int = 200) -> tuple[list[dict], str | None]:
     return channels, warning
 
 
+def search_history(query: str, limit_per_channel: int = 200, max_channels: int = 25) -> list[dict]:
+    """Case-insensitive substring search across channels the bot is a member of.
+
+    Slack's ``search.messages`` needs a USER token (`not_allowed_token_type` on a
+    bot token), so the workspace-wide search that CLAUDE.md documented could never
+    run. This does the next best thing with scopes the bot actually has: pull
+    recent history from each member channel and match locally.
+
+    Returns newest-first dicts: channel, ts, user, text, permalink-ish location.
+    """
+    needle = query.lower().strip()
+    if not needle:
+        return []
+    channels, _ = list_channels()
+    hits: list[dict] = []
+    for ch in [c for c in channels if c["is_member"]][:max_channels]:
+        try:
+            body = api_get("conversations.history",
+                           {"channel": ch["id"], "limit": str(limit_per_channel)})
+        except SlackError:
+            continue  # one unreadable channel must not sink the search
+        for m in body.get("messages", []):
+            text = unwrap_slack_text(m.get("text", ""))
+            if needle in text.lower():
+                hits.append({
+                    "channel": ch["name"], "channel_id": ch["id"],
+                    "ts": m.get("ts", ""), "user": m.get("user", "?"), "text": text,
+                })
+    hits.sort(key=lambda h: h["ts"], reverse=True)
+    return hits
+
+
 def post_message(channel: str, thread_ts: str | None, text: str) -> None:
     """Fire-and-forget post used by the listener's background threads.
 
