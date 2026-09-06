@@ -332,6 +332,58 @@ def search_history(query: str, limit_per_channel: int = 200, max_channels: int =
     return hits
 
 
+def fetch_message_files(channel: str, ts: str, out_dir) -> list:
+    """Download the files attached to one message. Returns local paths.
+
+    Knowing that a message *has* images is not the same as knowing what they
+    show — a claim in the text can be contradicted or narrowed by its own
+    screenshots. This pulls them to disk so an agent can actually look.
+
+    Slack's ``url_private`` needs the bot token as a bearer header; fetching it
+    unauthenticated returns an HTML login page, not the image.
+    """
+    from pathlib import Path as _Path
+
+    out = _Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    # conversations.history only returns TOP-LEVEL messages, so a file posted as a
+    # thread reply is invisible to it — and replies are exactly where figures get
+    # attached. Fall back to conversations.replies, which resolves a reply's own ts.
+    messages = api_get("conversations.history", {
+        "channel": channel, "latest": ts, "oldest": ts, "inclusive": "true", "limit": "1",
+    }).get("messages", [])
+    if not messages:
+        messages = [m for m in api_get("conversations.replies", {
+            "channel": channel, "ts": ts, "limit": "5",
+        }).get("messages", []) if m.get("ts") == ts]
+    if not messages:
+        raise SlackError(f"no message at ts={ts} in {channel}")
+
+    saved = []
+    for f in messages[0].get("files") or []:
+        url = f.get("url_private_download") or f.get("url_private")
+        if not url:
+            continue
+        name = f.get("name") or f"{f.get('id', 'file')}"
+        req = urllib.request.Request(url)
+        req.add_header("Authorization", f"Bearer {bot_token()}")
+        req.add_header("User-Agent", "lab-agent/1.0")
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = resp.read()
+        except Exception as exc:
+            print(f"[slack] could not download {name}: {exc}")
+            continue
+        if data[:15].lstrip().lower().startswith(b"<!doctype html"):
+            print(f"[slack] {name}: got an HTML page, not the file — token lacks files:read?")
+            continue
+        path = out / name
+        path.write_bytes(data)
+        saved.append(path)
+    return saved
+
+
 def post_message(channel: str, thread_ts: str | None, text: str) -> None:
     """Fire-and-forget post used by the listener's background threads.
 

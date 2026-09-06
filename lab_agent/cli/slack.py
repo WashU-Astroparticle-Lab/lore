@@ -7,6 +7,7 @@ Slack from the pipeline — the ONE supported way for an agent to talk to Slack.
     python -m lab_agent.cli.slack read-thread --channel C123 --thread TS [--limit 50]
     python -m lab_agent.cli.slack channels    [--filter kid]
     python -m lab_agent.cli.slack search      --query "presto vna" [--limit 20]
+    python -m lab_agent.cli.slack fetch-files --channel C123 --ts 1788391397.681369
 
 Why this exists: every session used to hand-roll these calls as `python -c "..."`
 one-liners and got them wrong in a different way each time — backticks in the
@@ -24,7 +25,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from ..config import load_env
+from ..config import PROJECT_ROOT, load_env
 from ..slack import api
 
 
@@ -188,8 +189,26 @@ def cmd_search(opts: dict) -> None:
     if hits:
         # The failure this guards against: a claim and the screenshots supporting
         # it are separate messages, so the matched line alone reads as settled fact.
-        print("[slack] a matched line is not the whole story — check the nearby "
-              "messages and any attachments before concluding anything from it")
+        print("[slack] a matched line is not the whole story — check the nearby messages, "
+              "and for any ATTACHMENTS run:  fetch-files --channel <id> --ts <ts>  and read "
+              "them before concluding anything from the text")
+
+
+def cmd_fetch_files(opts: dict) -> None:
+    channel = opts.get("channel") or _die("fetch-files needs --channel")
+    ts = opts.get("ts") or _die("fetch-files needs --ts (from a search or read-thread line)")
+    out = Path(opts.get("out") or (PROJECT_ROOT / "knowledge" / "slack_files" / ts.replace(".", "_")))
+    try:
+        saved = api.fetch_message_files(channel, ts, out)
+    except api.SlackError as exc:
+        _die(f"fetch-files failed: {exc}", 2)
+    if not saved:
+        print(f"[slack] no downloadable files on message {ts}")
+        return
+    print(f"[slack] {len(saved)} file(s) downloaded — READ THEM before drawing any "
+          "conclusion from the message text:")
+    for p in saved:
+        print(f"  {p}")
 
 
 COMMANDS = {
@@ -198,6 +217,7 @@ COMMANDS = {
     "read-thread": cmd_read_thread,
     "channels": cmd_channels,
     "search": cmd_search,
+    "fetch-files": cmd_fetch_files,
 }
 
 
