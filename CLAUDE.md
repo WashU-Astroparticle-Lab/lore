@@ -48,9 +48,16 @@ Decide the request type, then invoke that skill (do the ambiguity-resolution bel
 | A **question / knowledge query** about past work — "what do we know about…", "have we ever…", "which experiments/runs…", an overview/topic question, or a figure/plot/value question | **`lab-qa`** |
 | A request for a **DR conditions report** for a past date or time window, with no experiment | **`dr-report`** |
 | A question about **current** DR conditions — "right now", "how's the DR", "what's the MXC temp" | **`dr-status`** |
-| A request to **send/post a message to a Slack channel** — "post this to the group", "share these plots in #channel" | **`slack-post`** |
+| A request to **compose or send a message for a Slack channel** — "post this to the group", "share these plots in #channel", **"draft a summary to post"**, "write something for the team", "put together an update" | **`slack-post`** |
 
 When in doubt between a report and a question: if the user wants a document produced and uploaded, it's a report; if they want an answer, it's `lab-qa`.
+
+**Drafting counts as posting.** "Draft a summary to post to the group" is `slack-post`, not a
+Q&A task — the verb is *draft* but the destination is a channel, and everything that makes the
+difference (which channel, which figures, the approval step, the verified send) lives in that
+skill. Missing this once produced a plausible draft with no channel named and no figures
+attached, which is exactly the ten-turn exchange the skill exists to prevent. If the message
+is destined for anyone other than the person asking, use `slack-post`.
 
 ## Agent capabilities — always available
 
@@ -138,6 +145,7 @@ All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from 
 | Fetch a page's figures | `python -m lab_agent.cli.fetch_page_images "<page>"` |
 | Zoom/crop a figure | `python -m lab_agent.cli.view_figure "<path>" [--crop X0 Y0 X1 Y1] [--scale 2]` |
 | Resolution regression check | `python -m lab_agent.cli.eval_qa` |
+| Check a draft's numbers against a report | `python -m lab_agent.cli.verify_claims --draft <file> --source outputs/<id>` — presence only; wrong-label pairing still needs reading |
 | Refresh LabArchives cookies | `python get_la_cookies.py` |
 | Slack (post/upload/read-thread/channels/search/fetch-files) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above |
 | DR conditions | `python run_dr.py "YYYY-MM-DD" [--hours N]` |

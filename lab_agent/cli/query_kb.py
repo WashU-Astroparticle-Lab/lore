@@ -70,9 +70,29 @@ def main() -> None:
                 print(f"  [{src}]  ({tag})")
         return
 
+    # Say WHY the graph is unavailable, loudly and first. These are two different
+    # failures with different fixes, and collapsing them into one quiet
+    # parenthetical hid a real one: a session running under the wrong interpreter
+    # got keyword-only results, reported "I don't have enough information", and
+    # nothing indicated the graph had never been consulted.
+    import sys as _sys
+
+    deps_missing = not kg.available()
+    print("=" * 72)
+    if deps_missing:
+        print("!! KNOWLEDGE GRAPH UNAVAILABLE — answering from keyword search only.")
+        print(f"   The RAG packages are not importable by this interpreter:")
+        print(f"     {_sys.executable}")
+        print("   They are almost certainly installed in the project interpreter — check")
+        print("   the PYTHON row in lab_config.md and re-run with that. Only if it really")
+        print("   is a fresh environment: pip install -e '.[rag]'")
+    else:
+        print("!! KNOWLEDGE GRAPH NOT BUILT — answering from keyword search only.")
+        print("   Run:  build_kb --index")
+    print("   Treat what follows as a keyword match, NOT as the graph's answer, and say")
+    print("   so if you report it — 'nothing found' here does not mean nothing exists.")
+    print("=" * 72 + "\n")
     hits = ask.search(question, 6)
-    print("(knowledge graph not built — using keyword search; "
-          "run `build_kb --index` after `pip install -e '.[rag]'` to enable graph mode)\n")
     if not hits:
         print("No matches found.")
         return

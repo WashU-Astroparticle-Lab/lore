@@ -38,6 +38,30 @@ Then ask one question: *"Send this to #x, or tell me what to change?"*
 
 **Scope it.** If the work spans several runs, ask which one the message is about rather than covering everything — the answer is almost always "the latest".
 
+## Step 2b — check the numbers before you show anyone
+
+If the draft states results from an experiment, run it past its source:
+
+```bash
+cd $PROJECT_ROOT
+$PYTHON -m lab_agent.cli.verify_claims --draft <draft file> --source outputs/<experiment_id>
+```
+
+It compares every number in the draft against the **report** for that run (not the raw
+extractions — those hold tens of thousands of numbers and would pass anything). Exit 1
+lists the values that appear in no source, with the line each came from.
+
+**Know what it does and does not catch.** It catches invented, mistyped and half-remembered
+numbers. It does **not** catch a real number attached to the wrong label — one real draft
+said "+0.01 to +0.35 dBm at both tones" when the two tones were +0.01–0.15 and +0.13–0.35,
+and every one of those numbers exists in the report. So still read the draft against the
+report for pairing and hedging:
+
+- is each number attached to the right tone / instrument / device?
+- does an open question in the report get stated as settled in the draft? (that same draft
+  gave the filter as VBF-7331+ while the report flags VBF-7331+ vs VBF-3321+ as unresolved)
+- is anything hedged in the report stated flatly here?
+
 ## Step 3 — send, verified
 
 Write the approved text to a file, then:
