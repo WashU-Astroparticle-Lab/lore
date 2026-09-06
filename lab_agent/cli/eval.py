@@ -199,7 +199,14 @@ def check(out_dir: Path) -> list[Finding]:
             if rel.startswith(("http://", "https://", "data:")):
                 continue
             if not (out_dir / rel).exists():
-                err(f"{report.name}: embedded image not found: {rel}")
+                # A deliberately slimmed run (cleanup --images) has had its
+                # reconstructible figures removed after upload; a missing image
+                # there is expected bookkeeping, not a broken report. Any other
+                # missing image is still the wrong-folder-prefix bug.
+                if (out_dir / "images_pruned.json").exists():
+                    warn(f"{report.name}: image absent, run was slimmed after upload: {rel}")
+                else:
+                    err(f"{report.name}: embedded image not found: {rel}")
 
     return findings
 
