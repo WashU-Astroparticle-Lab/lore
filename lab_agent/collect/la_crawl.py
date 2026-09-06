@@ -24,6 +24,23 @@ from ..sources.labarchives.images import extract_embedded_img_urls
 from .okf import frontmatter
 
 
+def _la_image_id(url: str) -> str:
+    """LabArchives' own id for an inline image, from its URL.
+
+    The URL carries ``file_name=<id>.png``. That id is per-image and stable, so it
+    survives the page being reordered — unlike the positional ``img_N`` names we
+    otherwise fall back to. Returns "" when the parameter is absent.
+    """
+    import urllib.parse as _up
+
+    q = _up.parse_qs(_up.urlparse(url).query)
+    # Some manifests carry the param as "amp;file_name" (HTML-escaped &).
+    for key in ("file_name", "amp;file_name"):
+        if q.get(key):
+            return q[key][0]
+    return ""
+
+
 def _enumerate_pages(adapter, nbid: str, parent: str = "0", depth: int = 0,
                      out: list | None = None, exclude: set[str] | None = None
                      ) -> list[tuple[str, str]]:
@@ -95,6 +112,14 @@ def crawl(adapter=None, notebooks: list[str] | None = None,
                 if imgs:
                     images_out[_safe(display)] = {
                         "page": display, "nbid": nbid, "tree_id": tree_id, "images": imgs,
+                        # LabArchives assigns each inline image a stable id, carried in
+                        # its URL as file_name=<id>.png — 21 distinct ids for 21 images
+                        # on a real page. Recording them means a figure keeps its
+                        # identity when the page is reordered; without this the only
+                        # handle is position (img_1, img_5 …), so inserting one image
+                        # at the top renames every figure after it and a report's
+                        # citation silently points at a different picture.
+                        "image_ids": [_la_image_id(u) for u in imgs],
                     }
             text = "\n\n".join(e["content"] for e in entries if e.get("content"))
             if text.strip():

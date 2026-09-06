@@ -248,11 +248,16 @@ def verify_figures(run_dir: Path) -> dict:
 
     Returns {"checked", "matched", "changed", "missing", "unverifiable"}.
 
-    `changed` is the one that matters: a figure whose bytes differ from what the
-    report was written against. For a LabArchives figure that means the page was
-    edited after the report — either the plot was replaced, or an insertion
-    shifted the positional img_N numbering so this filename is now a different
-    picture entirely. Either way the report's description of it is stale.
+    This is a CHANGE DETECTOR, not an identity mechanism. It answers "are these
+    the same bytes?", which is not the same question as "is this the figure the
+    report meant" — and the two come apart both ways: the same plot re-exported
+    by a newer matplotlib hashes differently, while a reordered page can serve a
+    different picture under identical bytes at a shifted index. So treat
+    `changed` as "re-identify this figure", not as "the report is wrong".
+
+    Identity belongs to the figure itself: LabArchives' per-image id (recorded as
+    `la_id` in the fetched page's sources.json), a meaningful GitHub filename, the
+    surrounding page text, and what the user said — see the deduce-figure skill.
     """
     recorded: dict = {}
     meta_path = run_dir / "metadata.json"

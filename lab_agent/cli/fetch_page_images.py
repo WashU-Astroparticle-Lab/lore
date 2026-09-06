@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 from ..config import KNOWLEDGE_ROOT, load_env
 from ..collect.la_crawl import IMAGE_MANIFEST_PATH, _safe
@@ -83,9 +84,29 @@ def main() -> None:
         path.write_bytes(data)
         saved.append(str(path))
 
+    # Save each figure's LabArchives id next to it. fig_N is only its position on
+    # the page today; the id is the figure itself. With this, a figure keeps its
+    # identity across a page being reordered, and a caller can tell "this is the
+    # same plot, renumbered" from "this is a different plot".
+    from ..collect.la_crawl import _la_image_id
+    ids = rec.get("image_ids") or [_la_image_id(u) for u in rec["images"]]
+    sources = {
+        "page": rec["page"],
+        "fetched_at": __import__("time").strftime("%Y-%m-%dT%H:%M:%S"),
+        "note": ("fig_N is position on the page, not identity. la_id is LabArchives' own "
+                 "per-image id and is the stable handle — match on it, not on N."),
+        "figures": [
+            {"file": Path(p).name, "la_id": (ids[i] if i < len(ids) else ""), "url": rec["images"][i]}
+            for i, p in enumerate(saved)
+        ],
+    }
+    (out / "sources.json").write_text(
+        json.dumps(sources, ensure_ascii=False, indent=2), encoding="utf-8")
+
     print(f"Fetched {len(saved)}/{len(rec['images'])} figure(s) for page {rec['page']!r}:")
     for s in saved:
         print(f"  {s}")
+    print(f"  (identities in {out / 'sources.json'} — match figures by la_id, not by fig_N)")
 
     # Flag figures too large for the vision API (~2000 px/side in multi-image reads) so the
     # reader downsizes/zooms them via `view_figure` instead of hitting a silent rejection.
