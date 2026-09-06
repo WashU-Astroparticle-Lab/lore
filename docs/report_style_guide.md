@@ -66,10 +66,14 @@ Bullet list of unresolved issues, anomalies worth investigating, and follow-up e
 
 **10. Sources**
 Bullet list of all artifacts used, with clickable links where possible:
-- GitHub repo and individual notebooks: link to the GitHub URL provided
+- GitHub repo and individual notebooks: link to the GitHub URL provided. When `metadata.json` has `github_commit_sha`, pin the provenance by citing the 7-char short SHA and the `github_commit_date` as the snapshot date (e.g. "daq@`9f11532`, 2026-02-27").
 - LabArchives pages: page title (link to `https://mynotebook.labarchives.com/` if URL known)
 - Local output files: filename only
 - Images: grouped by source (GitHub images / LabArchives images), listed by filename
+- If `metadata.json` shows `github_tree_truncated: true`, note that some repo files may be missing from this report.
+
+**11. Citations**
+A numbered list mapping each `[n]` marker used in the report to its exact source — a LabArchives page + entry, a notebook cell (`## Cell N` of a file in `notebooks.md`), a data file, a dependency constant, or the DR data. **Every Key Parameters row carries a `[n]`** resolving here; other key numeric claims should too where practical. Never cite a link marked `not_found`/`unreachable` in `link_check.md` — write `[MISSING: <url>]` instead. (This formalizes the `Source` column into checkable claim→source links.)
 
 ## Rules
 
@@ -79,6 +83,7 @@ Bullet list of all artifacts used, with clickable links where possible:
 - Distinguish executed operations from stated goals: the Goal vs. Executed map in `connections.md` is authoritative — if a goal appears as "no" there, do not report it as executed; note the gap explicitly
 - Distinguish observed facts from inferences ("the data show..." vs "this suggests...")
 - Never read `[UNSIGNED]` files from the outputs folder as source material — they are prior AI-generated drafts and may contain errors
+- Never cite a link marked `not_found` or `unreachable` in `link_check.md` — write `[MISSING: <url>]` instead of the link
 
 **Claims and strength of language**
 - When using the word "consistent", always specify whether the agreement is qualitative (same trend, same order of magnitude) or quantitative (within X% of predicted value)

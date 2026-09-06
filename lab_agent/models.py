@@ -44,6 +44,10 @@ class CollectedArtifact(BaseModel):
     exists: bool = True
     source: str = "local"
     raw_bytes: Optional[bytes] = None  # image/binary content; saved to disk by run.py
+    # Provenance (WS2): where/when this artifact came from, for citations + freshness.
+    source_ref: Optional[str] = None   # commit SHA (GitHub) or entry id (LabArchives)
+    created_at: Optional[str] = None   # ISO timestamp, when available
+    updated_at: Optional[str] = None   # ISO timestamp, when available
 
 
 class ExperimentBundle(BaseModel):

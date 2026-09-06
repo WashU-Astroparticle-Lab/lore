@@ -17,6 +17,8 @@ Read the `[UNSIGNED]` report, all `extracted_*.md`, and `connections.md` in `<ou
 5. No physics mechanism is named that does not appear in any extracted file.
 6. The Key Parameters table appears exactly once in the report.
 7. The Key Findings section does not restate sentences that already appear in Results.
+8. **No dead link is cited as a source.** If `link_check.md` exists in `<out_dir>`, the report cites no URL marked `not_found` or `unreachable` there.
+9. **Citations resolve.** If the report has a `# Citations` section, every `[n]` marker in the body resolves to a numbered entry, and every Key Parameters row carries a citation.
 
 ## Checklist (DR-only reports — when the spawning prompt says so)
 
@@ -26,4 +28,11 @@ Read the `[UNSIGNED]` report, all `extracted_*.md`, and `connections.md` in `<ou
 
 ## Output
 
-End `critique.md` with a `## Summary` line: `PASS` (all items passed) or `FAIL` (list the failing item numbers).
+Write per-item `PASS`/`FAIL` above, then end `critique.md` with a `## Summary` line stating exactly one outcome:
+
+- `passed` — every checklist item passed.
+- `gaps_found: <item numbers>` — one or more items failed but are fixable by editing the report (unsourced value, dead link cited, duplicated section, overclaim). This triggers the one revision pass.
+- `expert_needed: <the specific question>` — a checklist item cannot be adjudicated from the extracted files (e.g. two sources give conflicting numbers with no way to decide which is right). Name the exact question a human must answer. Do **not** guess.
+- `human_needed: <what is broken>` — inputs are unusable (missing extracted files, unreadable report); no report edit can fix it.
+
+Use `passed`/`gaps_found` for normal quality issues; reserve `expert_needed`/`human_needed` for the genuine cases above.

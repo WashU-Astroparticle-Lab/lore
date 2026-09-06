@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -28,6 +29,9 @@ SESSION_TIMEOUT = 40 * 60  # Kill sessions still running after 40 minutes
 _active_sessions: list[dict] = []
 _seen_timestamps: set[str] = set()   # dedup: one session per Slack message ts
 _sessions_lock   = threading.Lock()
+# Requests to re-spawn as a FRESH session after a resume failed. Filled under the lock by the
+# reaper; drained outside the lock (spawn_claude re-acquires it) so there is no deadlock.
+_pending_retries: list[dict] = []
 
 
 # ── Claude session persistence (thread_ts → Claude Code session UUID) ─────────
@@ -130,25 +134,33 @@ def _reap_nolock() -> None:
                         api.post_message(s["channel"], s["thread_ts"], body)
             elif not s.get("timed_out"):
                 tail = read_log_tail(log_path) if log_path else ""
-                resume_error_keywords = ("no conversation found", "session not found",
-                                         "unknown session", "could not resume")
                 limit_keywords = ("hit your limit", "rate limit", "usage limit",
                                   "too many requests", "overloaded")
-                if s.get("resume_of") and any(k in tail.lower() for k in resume_error_keywords):
-                    # The stored Claude session is gone — drop the mapping so the
-                    # next message in this thread starts a fresh session.
+                if any(k in tail.lower() for k in limit_keywords):
+                    api.post_message(s["channel"], s["thread_ts"],
+                        f"<@{s['user']}> I hit the daily token limit mid-pipeline and stopped. "
+                        "The report is incomplete — try again after your limit resets.")
+                elif s.get("resume_of") and s.get("user_text"):
+                    # A RESUMED session failed (the stored Claude session often can't be
+                    # resumed after a listener restart / expiry, dying before it writes any
+                    # useful log). Don't surface a cryptic error — drop the mapping and
+                    # transparently re-run the SAME request as a FRESH session. The retry
+                    # has resume_of=None, so if it also fails it falls through to the normal
+                    # error path (no retry loop). Queued here, spawned after the lock frees.
                     forget_session(s["thread_key"])
-                    msg = (f"<@{s['user']}> I lost the saved context for this thread "
-                           "(the session expired). Please resend your last message and "
-                           "I'll pick it up fresh.")
-                elif any(k in tail.lower() for k in limit_keywords):
-                    msg = (f"<@{s['user']}> I hit the daily token limit mid-pipeline and stopped. "
-                           "The report is incomplete — try again after your limit resets.")
+                    _seen_timestamps.discard(s.get("current_ts"))
+                    _pending_retries.append({
+                        "user": s["user"], "text": s["user_text"], "channel": s["channel"],
+                        "thread_ts": s.get("orig_thread_ts"), "current_ts": s.get("current_ts"),
+                        "is_dm": s.get("is_dm", False),
+                    })
+                    print(f"[resume-fallback] resume failed for thread {s['thread_key']}; "
+                          "retrying as a fresh session", flush=True)
                 else:
                     log_name = Path(log_path).name if log_path else "unknown"
-                    msg = (f"<@{s['user']}> The session ended unexpectedly (exit {exit_code}). "
-                           f"Check session log: `{log_name}`")
-                api.post_message(s["channel"], s["thread_ts"], msg)
+                    api.post_message(s["channel"], s["thread_ts"],
+                        f"<@{s['user']}> The session ended unexpectedly (exit {exit_code}). "
+                        f"Check session log: `{log_name}`")
             _active_sessions.remove(s)
             # Clean up the prompt file now that the session is over
             pf = s.get("prompt_file")
@@ -165,15 +177,98 @@ def _reap_nolock() -> None:
             _seen_timestamps.discard(ts)
 
 
+def _drain_retries() -> None:
+    """Spawn any queued fresh-session retries OUTSIDE the lock (spawn_claude re-locks)."""
+    while True:
+        with _sessions_lock:
+            if not _pending_retries:
+                return
+            spec = _pending_retries.pop(0)
+        try:
+            spawn_claude(**spec)
+        except Exception as exc:  # noqa: BLE001 — a bad retry must not kill the reaper
+            print(f"[resume-fallback] retry spawn failed: {exc}", flush=True)
+
+
 def reap_finished() -> None:
     with _sessions_lock:
         _reap_nolock()
+    _drain_retries()
 
 
 def reaper_loop() -> None:
     while True:
         time.sleep(30)
         reap_finished()
+
+
+# ── Nightly knowledge-graph refresh ────────────────────────────────────────────
+#
+# The KG must be re-indexed as pages change, but a full rebuild is expensive, so
+# `build_kb --index` re-indexes only new/changed pages (manifest-driven; unchanged
+# pages cost no LLM tokens). We run that refresh from inside the always-on listener
+# so there is one long-lived process to keep alive. The standalone Task Scheduler
+# job (LORE-KG-nightly) is kept as a fallback; the cross-process build lock in
+# lab_agent.rag.build_lock ensures the two never build at the same time.
+
+KG_REFRESH_HOUR = int(os.environ.get("KB_REFRESH_HOUR", "2"))  # local hour, 0–23
+
+
+def _run_kg_refresh() -> None:
+    """Run one incremental KG refresh as a subprocess (plan auth, not API)."""
+    # Same env scrub as session spawns: the build LLM (`claude -p`) must use the
+    # Claude Code plan, not ANTHROPIC_API_KEY.
+    child_env = os.environ.copy()
+    for _var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        child_env.pop(_var, None)
+
+    logs_dir = PROJECT_ROOT / "session_logs"
+    logs_dir.mkdir(exist_ok=True)
+    log_path = logs_dir / "kg_refresh.log"
+
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(f"\n=== KG refresh started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        log.flush()
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "lab_agent.cli.build_kb", "--index"],
+            cwd=str(PROJECT_ROOT),
+            stdout=log,
+            stderr=log,
+            env=child_env,
+        )
+        proc.wait()
+    print(f"[kg-refresh] finished (exit {proc.returncode}); log: {log_path.name}", flush=True)
+    # Tell the warm KG service to reload the freshly-rebuilt graph (best-effort; no-op if the
+    # service isn't running). Otherwise it would keep serving the pre-refresh graph until restart.
+    if proc.returncode == 0:
+        try:
+            from ..rag.service import trigger_reload
+            if trigger_reload():
+                print("[kg-refresh] signaled warm KG service to reload.", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[kg-refresh] reload signal failed: {exc}", flush=True)
+
+
+def kg_refresh_loop() -> None:
+    """Fire an incremental KG refresh once per day at KG_REFRESH_HOUR (local time).
+
+    Checks every 5 minutes; runs at most once per calendar day. A failed refresh
+    is logged and retried the next day — it never takes the listener down. The
+    build lock makes a same-day double-run (e.g. after a listener restart, or the
+    Task Scheduler fallback firing too) safe and near-free.
+    """
+    last_run_date: tuple[int, int, int] | None = None
+    while True:
+        now = time.localtime()
+        today = (now.tm_year, now.tm_mon, now.tm_mday)
+        if now.tm_hour == KG_REFRESH_HOUR and today != last_run_date:
+            last_run_date = today
+            print("[kg-refresh] nightly window reached — starting incremental build", flush=True)
+            try:
+                _run_kg_refresh()
+            except Exception as exc:  # noqa: BLE001 — a bad refresh must not kill the listener
+                print(f"[kg-refresh] refresh failed: {exc}", flush=True)
+        time.sleep(300)  # re-check every 5 minutes
 
 
 # ── Log tail reader ──────────────────────────────────────────────────────────
@@ -269,7 +364,8 @@ urllib.request.urlopen(req, timeout=10)
 "
         """).strip()
         return _launch(user, channel, reply_ts, current_ts, prompt, resume_id=resume_id,
-                       thread_key=thread_key)
+                       thread_key=thread_key, orig_thread_ts=thread_ts, user_text=text,
+                       is_dm=is_dm)
 
     history_str = fetch_history(channel, thread_ts, current_ts)
 
@@ -331,6 +427,45 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
         - If info is still missing, ask naturally for just the missing piece.
         - For questions or chat, answer warmly and helpfully. Keep replies short and conversational.
 
+        ROUTING — decide this BEFORE doing anything else. Classify the latest message:
+          (A) REPORT REQUEST — it contains a GitHub URL, OR explicitly asks to write/generate/make
+              a report for a specific experiment, OR asks for a DR conditions report.
+              -> run the pipeline (see the steps below).
+          (B) QUESTION / KNOWLEDGE QUERY — a broad or specific question about the lab's past work:
+              "what do we know about...", "have we ever...", "which experiments/runs...", an
+              overview/topic question, or any request to find or summarise past findings.
+              -> ANSWER FROM THE KNOWLEDGE GRAPH. Run:
+                   python -m lab_agent.cli.query_kb "<the user's question>"
+                 and reply from its output, citing the experiment/page ids it returns. This is
+                 LOCAL and needs NO LabArchives cookies and NO fetching. For a type-(B) question you
+                 MUST NOT run run.py, MUST NOT open/fetch LabArchives pages, and MUST NEVER run
+                 get_la_cookies.py.
+                 RESOLVE IDENTIFIERS FIRST: query_kb prints a "Candidate pages (keyword/ID match)"
+                 list below its answer. The graph is weak at raw IDs (chip/run IDs, filenames in
+                 hyperlinks, e.g. BE260416); if the graph "doesn't have" an ID from the question but
+                 a candidate page clearly matches it, USE that page (for a figure/number question,
+                 run fetch_page_images on the top candidate and continue) instead of asking the user
+                 to name it. Only if candidates are genuinely ambiguous, list them and ASK WHICH ONE.
+                 If NOTHING matches, say so plainly and OFFER a full report — never fabricate,
+                 silently fetch, or trigger a cookie refresh.
+              EXCEPTION — a question about a specific PLOT/FIGURE: after query_kb finds the page,
+                 use the figure step in CLAUDE.md (`fetch_page_images` then Read the images), which
+                 is CHEAP-BY-DEFAULT, PRECISE-WHEN-NEEDED: handle qualitative "which/what does this
+                 show" reads yourself; for PRECISE/QUANTITATIVE reads (exact values, a mean, reading
+                 many points off a plot), or many figures to sift, or low-confidence, or user
+                 pushback, delegate the WHOLE figure job to one Opus image-analyst subagent (Agent
+                 tool, model: "opus", fresh context) that surveys the figures, ZOOMS the answer
+                 figure with `python -m lab_agent.cli.view_figure "<path>" --crop X0 Y0 X1 Y1 --scale
+                 2`, then reports per-item values + the computed result + which figure + confidence.
+                 That fetch is the one Q&A case that needs the cookie, and you REFRESH IT YOURSELF
+                 (like the report pipeline): if fetch_page_images reports COOKIE_REFRESH_NEEDED, post
+                 a short Slack heads-up ("Refreshing the LabArchives session — approve the Duo push on
+                 your phone"), run `python get_la_cookies.py` yourself, then retry fetch_page_images.
+                 (This overrides the "never run get_la_cookies.py" rule, which only applies to the
+                 text-only path.) The only human step is the Duo tap; only if the refresh fails/times
+                 out do you tell the user it couldn't refresh.
+          When unsure, prefer (B): answering from lab knowledge is fast, cheap, and never blocks on cookies.
+
         IMPORTANT — check thread history before running the pipeline:
         Each Slack reply spawns a fresh session. Read the conversation history carefully to
         determine what stage the pipeline is at before doing anything:
@@ -382,7 +517,8 @@ with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
     """).strip()
 
     _launch(user, channel, reply_ts, current_ts, prompt, resume_id=None,
-            thread_key=thread_key, session_id=session_id)
+            thread_key=thread_key, session_id=session_id, orig_thread_ts=thread_ts,
+            user_text=text, is_dm=is_dm)
 
 
 def _launch(
@@ -395,8 +531,15 @@ def _launch(
     resume_id: str | None,
     thread_key: str,
     session_id: str | None = None,
+    orig_thread_ts: str | None = None,
+    user_text: str = "",
+    is_dm: bool = False,
 ) -> None:
-    """Reserve a session slot and spawn the claude process (fresh or resumed)."""
+    """Reserve a session slot and spawn the claude process (fresh or resumed).
+
+    ``orig_thread_ts``/``user_text``/``is_dm`` are the original request inputs, stashed on the
+    slot so the reaper can re-spawn a fresh session verbatim if a resume fails.
+    """
     session_id = session_id or uuid.uuid4().hex[:8]
 
     # ── Atomic dedup + cap check ─────────────────────────────────────────────
@@ -451,6 +594,10 @@ def _launch(
             "timed_out":  False,
             "thread_key": thread_key,
             "resume_of":  resume_id,
+            "current_ts": current_ts,
+            "orig_thread_ts": orig_thread_ts,
+            "user_text":  user_text,
+            "is_dm":      is_dm,
         }
         _active_sessions.append(slot)
 

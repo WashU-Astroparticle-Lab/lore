@@ -30,15 +30,17 @@ import json
 import os
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
 
 from ..config import OUTPUT_ROOT, PROJECT_ROOT, lab_config_value, load_env
 
 load_env()
 
+from ..collect import okf
 from ..collect.dependencies import build_dependencies_md
 from ..collect.summarize import summarize_bundle
 from ..models import (
@@ -76,14 +78,43 @@ _GITHUB_URL_RE = re.compile(r"https?://github\.com/[^\s\)\"'<>]+")
 _BLOB_RE = re.compile(r"(https://github\.com/[^/]+/[^/]+)/blob/([^/]+)/(.*)")
 _REPO_ROOT_RE = re.compile(r"https?://github\.com/[^/]+/[^/?#]+/?$")
 
+# Auto-discovery fetches a URL found inside untrusted LabArchives content, so it
+# is gated in code (not left to the prompt): the host must be GitHub, an optional
+# org allowlist can restrict the owner, and the number of discovered URLs is capped.
+_ALLOWED_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+_MAX_DISCOVERED_URLS = 10
+
+
+def _allowed_github_orgs() -> set[str]:
+    """Optional owner allowlist from lab_config.md ('GitHub orgs', comma-separated).
+
+    Empty (key absent) means no org restriction — any github.com owner is allowed.
+    """
+    raw = lab_config_value("GitHub orgs")
+    return {o.strip().lower() for o in raw.split(",") if o.strip()}
+
+
+def _github_url_allowed(url: str, allowed_orgs: set[str]) -> bool:
+    """Host- and owner-allowlist gate for an auto-discovered GitHub URL."""
+    parts = urlparse(url)
+    if parts.netloc.lower() not in _ALLOWED_GITHUB_HOSTS:
+        return False
+    if allowed_orgs:
+        owner = parts.path.lstrip("/").split("/", 1)[0].lower()
+        if owner not in allowed_orgs:
+            return False
+    return True
+
 
 def _find_github_urls(artifacts: list[CollectedArtifact]) -> list[str]:
     """Scan artifact text content for GitHub URLs.
 
     Normalizes /blob/ref/path/file links to /tree/ref/parent_dir so
     GitHubAdapter can use them directly. Only returns URLs with /tree/ paths.
-    Bare repo root URLs are normalized to /tree/main.
+    Bare repo root URLs are normalized to /tree/main. Results are gated by an
+    allowlist (host, optional org) and capped at _MAX_DISCOVERED_URLS.
     """
+    allowed_orgs = _allowed_github_orgs()
     seen: set[str] = set()
     urls: list[str] = []
     for art in artifacts:
@@ -103,8 +134,15 @@ def _find_github_urls(artifacts: list[CollectedArtifact]) -> list[str]:
                 url = url.rstrip("/") + "/tree/main"
 
             if "/tree/" in url and url not in seen:
+                if not _github_url_allowed(url, allowed_orgs):
+                    print(f"[runner] Skipping discovered GitHub URL (host/org not allowed): {url}")
+                    continue
                 seen.add(url)
                 urls.append(url)
+                if len(urls) >= _MAX_DISCOVERED_URLS:
+                    print(f"[runner] Discovered-URL cap ({_MAX_DISCOVERED_URLS}) reached; "
+                          "ignoring further links.")
+                    return urls
     return urls
 
 
@@ -145,6 +183,15 @@ def _fetch_wiring_diagram() -> str | None:
 
 
 def run(github_url: str | None, la_pages: list[str]) -> str:
+    # Wall-clock stage timing (goal: keep the fetch layer "timely"). Marks are
+    # consecutive; each stage duration is the gap between adjacent marks. The
+    # summary is printed and stored in metadata.json under "fetch_timings_sec".
+    _t_start = time.perf_counter()
+    _marks: list[tuple[str, float]] = [("start", _t_start)]
+
+    def _mark(label: str) -> None:
+        _marks.append((label, time.perf_counter()))
+
     # 0. Fail fast on an expired web session BEFORE any fetching. Previously an
     # expired cookie only surfaced after the full text+image fetch, forcing a
     # complete rerun. One probe request catches it in seconds instead.
@@ -175,6 +222,7 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
         with ThreadPoolExecutor(max_workers=min(4, len(la_pages))) as pool:
             for arts in pool.map(lambda p: LabArchivesAdapter(p).fetch(), la_pages):
                 la_artifacts.extend(arts)
+    _mark("labarchives_fetch")
 
     # If no GitHub URL was given, look for one embedded in the LabArchives content
     discovered_urls: list[str] = []
@@ -188,10 +236,12 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
 
     # 2. Fetch GitHub artifacts (if a URL is available)
     github_bundle = None
+    gh_adapter = None
     if github_url:
         print(f"[runner] Fetching GitHub: {github_url}")
         try:
-            github_bundle = GitHubAdapter(github_url).load()
+            gh_adapter = GitHubAdapter(github_url)
+            github_bundle = gh_adapter.load()
         except Exception as exc:
             if discovered_urls and github_url in discovered_urls:
                 # Auto-discovered URL failed — warn and continue LabArchives-only
@@ -217,6 +267,15 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
             config=config,
             collected_artifacts=github_bundle.collected_artifacts + la_artifacts,
         )
+        # Multi-repo (S2): when several GitHub URLs were auto-discovered in the
+        # LabArchives content, fetch the extras too (capped, best-effort) so a
+        # cross-repo experiment is complete instead of dropping all but the first.
+        for extra_url in (discovered_urls[1:] if discovered_urls else [])[:3]:
+            print(f"[runner] Fetching additional discovered repo: {extra_url}")
+            try:
+                bundle.collected_artifacts.extend(GitHubAdapter(extra_url).load().collected_artifacts)
+            except Exception as exc:
+                print(f"[runner] Warning: additional repo fetch failed ({exc}). Skipping.")
     else:
         # LabArchives-only mode — build a minimal bundle
         experiment_id = _la_pages_to_experiment_id(la_pages)
@@ -234,6 +293,8 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
             collected_artifacts=la_artifacts,
         )
 
+    _mark("github_fetch")
+
     # Kick off dependency resolution in the background (network-bound) so it
     # overlaps with summarization and file writing; joined at step 8.
     deps_future = None
@@ -245,14 +306,37 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
 
     # 3. Extract structured content
     summary = summarize_bundle(bundle)
+    _mark("summarize")
     out_dir = Path(OUTPUT_ROOT) / summary.output_dirname
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4. Save notebook content
-    if summary.notebook_markdown:
-        nb_text = "\n\n---\n\n".join(summary.notebook_markdown)
-        (out_dir / "notebooks.md").write_text(nb_text, encoding="utf-8")
+    # 4. Save notebook content — full serialized cells (code + outputs), one
+    # section per notebook. Previously only markdown cells were written, so the
+    # analysts never saw the code or the result plots (WS1). Title/objective
+    # inference still uses markdown cells (handled in the GitHub adapter).
+    notebook_arts = [
+        a for a in bundle.collected_artifacts
+        if a.kind == "notebook" and a.exists and a.content
+    ]
+    if notebook_arts:
+        sections = [f"# {a.path}\n\n{a.content}" for a in notebook_arts]
+        (out_dir / "notebooks.md").write_text("\n\n---\n\n".join(sections), encoding="utf-8")
         print(f"[runner] Saved notebooks.md")
+
+    # 4b. Save standalone code scripts (.py/.r/.jl/.sh/.sql). Previously these were
+    # fetched but never surfaced to the analysts (S2 ingestion completeness).
+    script_arts = [
+        a for a in bundle.collected_artifacts
+        if a.kind == "code" and a.exists and a.content
+    ]
+    if script_arts:
+        lang = {"py": "python", "r": "r", "jl": "julia", "sh": "bash", "sql": "sql"}
+        sections = []
+        for a in script_arts:
+            suffix = a.path.rsplit(".", 1)[-1].lower() if "." in a.path else ""
+            sections.append(f"# {a.path}\n\n```{lang.get(suffix, '')}\n{a.content}\n```")
+        (out_dir / "scripts.md").write_text("\n\n---\n\n".join(sections), encoding="utf-8")
+        print(f"[runner] Saved scripts.md")
 
     # 5. Save LabArchives notes
     if summary.labarchives_context:
@@ -306,12 +390,18 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
         )
         print(f"[runner] Saved github_images.md")
 
-    # 7. Save data file summaries
+    # 7. Save data file summaries (CSV tables/summaries + binary data files — S2)
     data_parts = []
     if summary.csv_summaries:
         data_parts.extend(summary.csv_summaries)
     if summary.csv_tables:
         data_parts.extend(summary.csv_tables)
+    binary_summaries = [
+        f"**{a.path}** — {a.content}"
+        for a in bundle.collected_artifacts
+        if a.kind == "processed_data" and a.exists and a.content
+    ]
+    data_parts.extend(binary_summaries)
     if data_parts:
         (out_dir / "data_summaries.md").write_text("\n\n".join(data_parts), encoding="utf-8")
         print(f"[runner] Saved data_summaries.md")
@@ -323,19 +413,54 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
             (out_dir / "dependencies.md").write_text(deps_md, encoding="utf-8")
             print(f"[deps] Saved dependencies.md ({len(deps_md):,} chars)")
 
-    # 9. Write metadata for downstream phase scripts
+    _mark("write_and_deps")
+
+    # Per-stage wall-clock durations (seconds) from consecutive marks.
+    timings = {
+        label: round(t - _marks[i][1], 2)
+        for i, (label, t) in enumerate(_marks[1:])
+    }
+    timings["total"] = round(_marks[-1][1] - _t_start, 2)
+
+    # 9. Write metadata for downstream phase scripts (WS2 provenance enrichment)
+    la_entry_count = sum(
+        1 for a in bundle.collected_artifacts
+        if a.source == "labarchives" and a.kind == "notes" and a.content
+    )
+    files_written = sorted(p.name for p in out_dir.iterdir() if p.is_file())
     metadata = {
         "experiment_id": summary.output_dirname,
         "la_pages": la_pages,
         "github_url": github_url or "",
+        "discovered_github_urls": discovered_urls,
+        "github_commit_sha": gh_adapter.commit_sha if gh_adapter else None,
+        "github_commit_date": gh_adapter.commit_date if gh_adapter else None,
+        "github_tree_truncated": gh_adapter.tree_truncated if gh_adapter else False,
+        "la_entry_count": la_entry_count,
+        "run_timestamp": datetime.now().isoformat(timespec="seconds"),
+        "files": files_written,
+        "fetch_timings_sec": timings,
     }
     (out_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"[runner] Saved metadata.json")
 
+    # 10. OKF Phase 1 — make each collection file a self-describing concept and
+    # write index.md, so the run directory is a browsable knowledge bundle.
+    okf.finalize_bundle(
+        out_dir,
+        resource=github_url or "",
+        source_ref=gh_adapter.commit_sha if gh_adapter else None,
+        timestamp=gh_adapter.commit_date if gh_adapter else None,
+        tags=[summary.output_dirname],
+    )
+    print(f"[runner] Wrote OKF frontmatter + index.md")
+
     print(f"[runner] Output folder: {out_dir}")
     print(f"[runner] Artifacts: {', '.join(e.rsplit(' (', 1)[0] for e in summary.evidence_map)}")
+    print(f"[runner] Fetch timings (s): "
+          + ", ".join(f"{k}={v}" for k, v in timings.items()))
     return str(out_dir)
 
 

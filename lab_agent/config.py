@@ -22,6 +22,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = PROJECT_ROOT / ".env"
 LAB_CONFIG_PATH = PROJECT_ROOT / "lab_config.md"
 OUTPUT_ROOT = PROJECT_ROOT / "outputs"
+# Cross-run knowledge bundle (OKF Phase 3) — local per-machine memory, gitignored.
+KNOWLEDGE_ROOT = PROJECT_ROOT / "knowledge"
+
+
+def kb_dir() -> Path:
+    """LightRAG knowledge-graph index directory. Defaults to ``knowledge/kb``.
+
+    Override with ``KB_STORAGE_DIR`` to a path OUTSIDE a cloud-synced folder
+    (OneDrive/Dropbox): their background sync locks files mid-write and breaks
+    LightRAG's atomic ``.tmp -> rename``, causing WinError 5 (Access denied) during a
+    build. On a machine where the repo lives under OneDrive, point this at e.g.
+    ``%LOCALAPPDATA%/lore_kb``.
+    """
+    override = os.environ.get("KB_STORAGE_DIR")
+    return Path(override) if override else (KNOWLEDGE_ROOT / "kb")
 
 # .env keys the experiment pipeline needs (checked by check_env()).
 REQUIRED_ENV_KEYS = ["GITHUB_TOKEN", "LA_AKID", "LA_SECRET", "LA_UID"]

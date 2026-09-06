@@ -39,7 +39,7 @@ def fetch_dm_history(channel: str, current_ts: str, limit: int = 30) -> str:
     for msg in reversed(data.get("messages", [])):
         if msg.get("ts") == current_ts:
             continue
-        text = msg.get("text", "").strip()
+        text = api.unwrap_slack_text(msg.get("text", "")).strip()
         if not text:
             continue
         is_bot = bool(msg.get("bot_id")) or msg.get("user") == api.BOT_USER_ID
@@ -71,7 +71,7 @@ def fetch_history(channel: str, thread_ts: str | None, current_ts: str) -> str:
     for msg in data.get("messages", []):
         if msg.get("ts") == current_ts:
             continue
-        text = msg.get("text", "").strip()
+        text = api.unwrap_slack_text(msg.get("text", "")).strip()
         if not text:
             continue
         is_bot = bool(msg.get("bot_id")) or msg.get("user") == api.BOT_USER_ID

@@ -1,0 +1,25 @@
+{
+  "discovered_github_urls": [],
+  "experiment_id": "power_calibration_20260227",
+  "files": [
+    "[UNSIGNED] power_calibration_20260227.md",
+    "connections.md",
+    "critique.md",
+    "data_summaries.md",
+    "dependencies.md",
+    "extracted_deps.md",
+    "extracted_github.md",
+    "extracted_labarchives.md",
+    "github_images.md",
+    "labarchives.md",
+    "labarchives_images.md",
+    "metadata.json",
+    "notebooks.md"
+  ],
+  "github_commit_date": "2026-05-14T18:08:35Z",
+  "github_commit_sha": "ac7ee2a15897548f177b740659fde57ae80fd070",
+  "github_tree_truncated": false,
+  "github_url": "https://github.com/WashU-Astroparticle-Lab/analysis_archive/tree/ac7ee2a15897548f177b740659fde57ae80fd070/DAQ/power_calibration_20260227",
+  "la_entry_count": 0,
+  "la_pages": []
+}

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.parse
 import urllib.request
 
@@ -16,6 +17,29 @@ from ..config import load_env
 
 # Populated at listener startup via set_bot_user_id().
 BOT_USER_ID: str = ""
+
+
+# Slack auto-links URLs in a message's `text` as <url> or <url|label>. Match only
+# real links (http/https/mailto) so user/channel mentions (<@U…>, <#C…|name>,
+# <!here>) are left untouched.
+_SLACK_LINK_RE = re.compile(r"<(?P<url>(?:https?://|mailto:)[^|>\s]+)(?:\|[^>]*)?>")
+
+
+def unwrap_slack_text(text: str) -> str:
+    """Undo Slack's message formatting so downstream consumers see plain text.
+
+    Slack wraps links in a message's ``text`` as ``<url>`` or ``<url|label>`` and
+    HTML-escapes ``&``, ``<``, ``>``. Left as-is, a GitHub URL reaches the spawned
+    agent as ``<https://github.com/...>`` and the leading ``<`` breaks run.py's URL
+    parsing (the arg no longer starts with "http"). This replaces each auto-linked
+    URL with its bare URL and unescapes entities. Mentions are left untouched.
+    """
+    if not text:
+        return text
+    text = _SLACK_LINK_RE.sub(lambda m: m.group("url"), text)
+    # Unescape entities; &amp; last so an escaped "&lt;" (sent as "&amp;lt;")
+    # round-trips correctly rather than collapsing to "<".
+    return text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
 
 
 def bot_token() -> str:
