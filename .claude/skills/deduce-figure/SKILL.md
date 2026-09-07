@@ -68,9 +68,21 @@ Accuracy on plots matters, but only pay the heavy read when the question needs i
   3. Read each value carefully, **compute** the requested statistic, and report **per-item values + the result + which figure + an honest confidence/± range**. Never invent values it cannot resolve; if the figure doesn't permit a reliable read, say so and point to the source (e.g. the linked analysis notebook).
   Token-efficient: one subagent, a cheap survey, high-res zoom only on the figure that matters.
 
-  **Delegate or do it — never both.** If you spawn an analyst, wait for it and use what it
-  returns. One run spawned one, waited 150 s, then ran the search itself anyway and ignored
-  the answer: 275 seconds for 25 seconds of work. If you can find and read the figure
-  yourself in a couple of calls — which Step 0 usually makes possible — do not delegate at all.
+  **Spawn it BLOCKING — `run_in_background: false`.** A Slack session is one-shot: it does
+  the work and exits. An async agent that promises "you will be notified when it completes"
+  has nobody left to notify, and its answer is lost. One run launched one, waited 150 s,
+  gave up, did the search itself and ignored the result — 275 seconds for 25 seconds of
+  work — and that agent's output file was still **0 bytes** three minutes after the session
+  ended. It never returned anything at all.
+
+  **Delegate or do it — never both.** If you spawn an analyst, use what it returns. If the
+  result is empty or does not arrive, say so in your reply rather than silently substituting
+  your own answer; a delegated read that produced nothing is worth the user knowing about.
+
+  **Only delegate when the read is genuinely hard** — reading many points off a plot,
+  computing a statistic, resolving fine detail. Opus earns its cost there: it once read nine
+  scatter points off a Qc-vs-Qi plot and returned a mean of ~63,000 ± 3,000 that matched a
+  careful manual read. For "which plot is this" or "what does this show", Step 0 plus your
+  own read is faster and just as good.
 
 - If several figures could match, briefly describe the candidates and **ask which one** before going deep — don't assume.

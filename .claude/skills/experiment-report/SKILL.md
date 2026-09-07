@@ -134,6 +134,12 @@ Spawn in **one message, immediately after run.py**, each with `<out_dir> = <the 
 When they finish, resolve the DR answer (Step 2b). If yes, fetch DR data and spawn:
 - **`dr-analyst`** → `<out_dir>/extracted_dr.md` — **spawn only once `<out_dir>/dr_conditions.md` exists**.
 
+**If a phase agent returns nothing.** A spawned agent can come back empty — one figure-read
+agent's output file was still 0 bytes three minutes after its parent had given up on it.
+When that happens: check whether the file it was supposed to write exists, re-spawn **once**,
+and if it is still empty, say so and stop. Do **not** quietly do the phase's work yourself —
+that is precisely how a report reached LabArchives without ever being critiqued.
+
 ### Phase B — synthesis (1 subagent)
 
 After all Phase A agents finish **and the DR answer is resolved**, spawn **`synthesis`** with the `<out_dir>` prompt → `<out_dir>/connections.md`.
