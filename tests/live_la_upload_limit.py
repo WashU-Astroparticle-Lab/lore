@@ -1,5 +1,5 @@
 """
-test_la_upload_limit.py — Binary-search the LabArchives rich-text entry size limit.
+live_la_upload_limit.py — Binary-search the LabArchives rich-text entry size limit.
 
 **THIS WRITES TO THE REAL LABARCHIVES NOTEBOOK.** It is not a unit test and is
 deliberately named `live_*` so it does not match the `tests/test_*.py` glob.

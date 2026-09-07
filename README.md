@@ -184,7 +184,7 @@ lab-agent/
 │   └── cli/                   # Argument parsing for the root shims
 │
 ├── tests/
-│   └── test_la_upload_limit.py
+│   └── live_la_upload_limit.py   # live LA probe; needs LORE_LIVE_LA_TEST=1
 └── vendor/
     └── presto-2.16.0-py3-none-any.whl
 ```
