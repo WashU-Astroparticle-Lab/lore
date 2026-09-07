@@ -1,13 +1,20 @@
 """
 test_la_upload_limit.py — Binary-search the LabArchives rich-text entry size limit.
 
-Creates a throwaway test page in the AI Agent folder, posts entries of increasing
-size until a 413 is returned, then binary-searches the threshold.
+**THIS WRITES TO THE REAL LABARCHIVES NOTEBOOK.** It is not a unit test and is
+deliberately named `live_*` so it does not match the `tests/test_*.py` glob.
 
-Cleans up the test page at the end (best-effort).
+It was named `test_la_upload_limit.py`, self-executed via `__main__`, created a
+fresh page on every run, and "cleaned up" by *printing* a reminder to delete the
+page by hand. Every `for t in tests/test_*.py` sweep therefore left another page
+behind: the AI Agent folder reached 27 `_upload_limit_test_DELETE_ME` pages
+against 6 real reports.
+
+Two guards now: it refuses to run without `LORE_LIVE_LA_TEST=1`, and it reuses
+the single existing test page instead of creating another one.
 
 Usage:
-    python test_la_upload_limit.py
+    LORE_LIVE_LA_TEST=1 python tests/live_la_upload_limit.py
 
 Output: prints the approximate maximum payload size LabArchives will accept.
 """
@@ -29,6 +36,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))
 from lab_agent.publish.labarchives import (
     _get_adapter,
     _find_upload_folder,
+    _find_page_in_folder,
     _insert_page,
     _add_text_entry,
 )
@@ -75,13 +83,31 @@ def _try_post(nbid: str, page_tree_id: str, html: str) -> bool:
         raise
 
 
+PAGE_TITLE = "_upload_limit_test_DELETE_ME"
+
+
 def main() -> None:
-    print("[test] Connecting to LabArchives…")
+    if os.environ.get("LORE_LIVE_LA_TEST") != "1":
+        print(
+            "[live] REFUSING TO RUN: this probe posts real entries to a real page\n"
+            f"       ('{PAGE_TITLE}') in the LabArchives AI Agent folder.\n"
+            "       It is not part of the unit suite. Run it deliberately:\n"
+            "         LORE_LIVE_LA_TEST=1 python tests/live_la_upload_limit.py"
+        )
+        return
+
+    print("[live] Connecting to LabArchives…")
     adapter = _get_adapter()
     nbid, folder_tree_id = _find_upload_folder(adapter)
-    print(f"[test] Found upload folder. Creating test page…")
-    page_tree_id = _insert_page(nbid, folder_tree_id, "_upload_limit_test_DELETE_ME")
-    print(f"[test] Test page created (tree_id={page_tree_id[:40]}…)")
+
+    # Reuse the existing test page. Creating one per run is what produced 27 of
+    # them; the folder is the lab's real notebook, not a scratch space.
+    page_tree_id = _find_page_in_folder(adapter, nbid, folder_tree_id, PAGE_TITLE)
+    if page_tree_id:
+        print(f"[live] Reusing existing test page (tree_id={page_tree_id[:40]}…)")
+    else:
+        page_tree_id = _insert_page(nbid, folder_tree_id, PAGE_TITLE)
+        print(f"[live] Created the one test page (tree_id={page_tree_id[:40]}…)")
 
     try:
         # Phase 1: exponential probe — double images until 413
@@ -131,7 +157,8 @@ def main() -> None:
         print(f"  (body KB / 1.41 overhead = raw KB; set cap slightly below this)")
 
     finally:
-        print(f"\n[test] Done. Manually delete the test page '_upload_limit_test_DELETE_ME' from LabArchives / AI Agent.")
+        print("[live] Done. The single test page is left in place and reused "
+              "next run - deleting it just means the next run creates another.")
 
 
 if __name__ == "__main__":
