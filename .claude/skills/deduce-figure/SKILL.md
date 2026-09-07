@@ -31,6 +31,27 @@ where both files had been sitting the whole time. 275 seconds for 25 seconds of 
 Only go to Step 1 when the figure is **not** in any run directory — a page that has never
 been through the report pipeline.
 
+## Step 0b — you must LOOK at every figure you send
+
+Finding the file is not answering the question. **Read each figure you are about to surface**
+and give two or three lines on what it shows: axes and span, how many traces/panels, the shape
+that matters, and the one thing the reader should notice. Then upload.
+
+This is the part the lab actually values, so it is not optional. Uploading a figure you have
+not opened produced this entire reply to "can you show me the two no-filter comparison plots?":
+
+> Both plots are uploaded and confirmed in the thread — `cell4` (6.436588 GHz) and `cell6`
+> (6.9 GHz), the no-filter Presto vs VNA overlays.
+
+54 seconds, correct files, and nothing a reader could not have got from the filenames. The
+version people asked to keep reads like this:
+
+> **cell4** — 6.436588 GHz: full-span Presto vs VNA overlay across 5 power levels (−30 to
+> −35 dBm), with zoomed resonance views on the right (~6.42–6.46 GHz).
+
+Same length. The difference is that someone looked. Combine it with Step 1c: the *description*
+is yours, the *numbers* come from the report.
+
 ## Step 1 — fetch the figures (only if Step 0 found nothing)
 
 ```bash
@@ -66,7 +87,9 @@ simply wrong, and 0.55 appears nowhere in the run.
 
 So when the figure comes from `outputs/<id>/`:
 
-1. Read the figure and describe it in your own words — that part stays.
+1. Read the figure and describe it in your own words — **required**, per Step 0b. Skipping
+   the description to avoid getting a number wrong is the wrong trade: say less about the
+   numbers, not less about the figure.
 2. **Take every number from the report** (`[UNSIGNED] *.md`) or `provenance.md`, not from
    your read of the image.
 3. If what you see genuinely disagrees with the report, **say so explicitly** — that is a
