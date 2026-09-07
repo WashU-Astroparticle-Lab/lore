@@ -9,7 +9,29 @@ Fetch a LabArchives page's figures and read/interpret a specific plot to answer 
 
 If you only have an identifier or vague reference (not a page name), resolve it first via the **find-device-notes** skill, then come here with the page name.
 
-## Step 1 — fetch the figures
+## Step 0 — look in the run directory FIRST (local, free, instant)
+
+If the figure could belong to an experiment that has been reported, its files are already
+on disk. Check before fetching anything:
+
+```bash
+ls outputs/<experiment_id>/github_images/ outputs/<experiment_id>/labarchives_images/
+```
+
+Not sure of the id? `ls outputs/` — the names are experiment ids. A run directory holds
+both the GitHub notebook figures **and** the LabArchives page images that run used, with
+meaningful filenames (`Presto_vs_VNA_NoFilter_cell4_out1.png` names notebook, cell and
+output). No cookie, no download, no wait.
+
+**This is the cheapest source and it was being checked last.** One real request for "the
+Presto vs VNA no-filter comparison plots" went `query_kb` → fetched 18 unrelated
+LabArchives figures → spawned a subagent → waited 150 s → and only then ran `ls outputs/`,
+where both files had been sitting the whole time. 275 seconds for 25 seconds of work.
+
+Only go to Step 1 when the figure is **not** in any run directory — a page that has never
+been through the report pipeline.
+
+## Step 1 — fetch the figures (only if Step 0 found nothing)
 
 ```bash
 cd $PROJECT_ROOT
@@ -45,5 +67,10 @@ Accuracy on plots matters, but only pay the heavy read when the question needs i
   2. **Zoom** the answer figure if the detail is small — `python -m lab_agent.cli.view_figure "<path>" --crop X0 Y0 X1 Y1 --scale 2` (coords are 0–1 fractions of width/height) — and Read the crop for a legible read.
   3. Read each value carefully, **compute** the requested statistic, and report **per-item values + the result + which figure + an honest confidence/± range**. Never invent values it cannot resolve; if the figure doesn't permit a reliable read, say so and point to the source (e.g. the linked analysis notebook).
   Token-efficient: one subagent, a cheap survey, high-res zoom only on the figure that matters.
+
+  **Delegate or do it — never both.** If you spawn an analyst, wait for it and use what it
+  returns. One run spawned one, waited 150 s, then ran the search itself anyway and ignored
+  the answer: 275 seconds for 25 seconds of work. If you can find and read the figure
+  yourself in a couple of calls — which Step 0 usually makes possible — do not delegate at all.
 
 - If several figures could match, briefly describe the candidates and **ask which one** before going deep — don't assume.

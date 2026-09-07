@@ -153,7 +153,8 @@ All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from 
 | Keyword/identifier search (free) | `python -m lab_agent.cli.ask "<question>"` |
 | Read one crawled page verbatim | `knowledge/labarchives/<safe_page_name>.md` — just Read the file |
 | Rebuild/refresh the KG | `python -m lab_agent.cli.build_kb [--index] [--full]` |
-| Fetch a page's figures | `python -m lab_agent.cli.fetch_page_images "<page>"` |
+| **List a run's figures (free, instant)** | `ls outputs/<id>/github_images/ outputs/<id>/labarchives_images/` — **check here before fetching anything**; a reported run already holds its figures locally |
+| Fetch a page's figures (cookie-gated) | `python -m lab_agent.cli.fetch_page_images "<page>"` — only when the figure is in no run directory |
 | Zoom/crop a figure | `python -m lab_agent.cli.view_figure "<path>" [--crop X0 Y0 X1 Y1] [--scale 2]` |
 | Resolution regression check | `python -m lab_agent.cli.eval_qa` |
 | Check a draft's numbers against a report | `python -m lab_agent.cli.verify_claims --draft <file> --source outputs/<id>` — presence only; wrong-label pairing still needs reading |
