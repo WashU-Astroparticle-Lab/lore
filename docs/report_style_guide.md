@@ -28,7 +28,56 @@ For example:
 **Report generated:** 2026-04-09
 ```
 
-## Report sections
+## Which template — brief is the default
+
+**Write the brief (plain-language) report unless the request says "full" / "detailed".** This is the lab's stated preference: of everything the pipeline has produced, the plain-language version was picked as the best, and "shorter / drop the Key Parameters table / plain units" has been asked for on separate occasions. Defaulting to it removes the most common reason a report needs a second pass.
+
+- **Brief (default)** — "Brief report sections" below. Readable by the whole group, every exact number retained.
+- **Full** — "Full report sections" below. Use only when explicitly requested, or when the report is a formal record for an external audience.
+
+Both templates obey the same **Rules** section: sourcing, claim strength, and figure honesty do not relax with the format. Both also require the sourcing sidecar (`provenance.md`) and the Slack summary (`slack_summary.md`).
+
+---
+
+## Brief report sections (default)
+
+Place a horizontal rule (`---`) between sections.
+
+**Header block** — same as the full template (title, `**Experiment:**`, `**LabArchives pages:**`, `**Report generated:**`).
+
+**1. What We Did**
+Two or three short paragraphs of plain language: what was compared or measured, why, what changed since any previous run, and the conditions (frequencies, power range, instruments). Name the instruments and say what they are on first use — a labmate outside this experiment should follow it.
+
+**2. Setup / Calibration** *(only when there is a setup worth stating)*
+What had to be true before the measurement means anything. Embed the calibration artifact here if there is one (a notebook photo, a settings table). End with a bold **Key takeaway:** line.
+
+**3. Main Result: \<state the result in the heading\>**
+The heading itself carries the finding — "Main Result: Presto and VNA Agree Well", not "Results". Give the numbers with units, embed the figure that shows it directly beneath the claim it supports, and end with a bold **Bottom line:** line saying what it means practically.
+
+**4. New Finding: \<state the finding in the heading\>** *(repeat per finding)*
+One section per genuinely new observation, heading-as-conclusion again ("New Finding: VNA Double Peak = VNA Output Problem (Not the Reference Clock)"). Say what was tried, what was seen, and what it rules in or out. Keep the honest limits — "we don't yet know why" belongs here, not in a footnote.
+
+**5. What This Tells Us** *(optional)*
+Cross-run or cross-condition implications that do not belong to a single finding — e.g. what comparing with and without a component reveals about that component.
+
+**6. Open Questions**
+Short bullets, plain terms, one line each.
+
+**7. Sources**
+Bullet list: notebooks (link to the GitHub URL, pinned to the commit SHA from `metadata.json`), LabArchives page titles, key photos or data files. No citation markers — the sidecar carries provenance.
+
+### Brief-template rules
+
+- **Plain language, exact numbers.** Simplify the prose, never the data: keep every value, unit, and range exactly as the extracted files give them. "Within ±0.35 dBm" is fine; "about a third of a dB" is not.
+- **No Table of Contents, no Key Parameters table, no Methods section, no Citations section.** Parameters that matter appear in the sentence that uses them.
+- **Every figure sits at the claim it supports**, with a caption saying what to *look at*, not merely what the image is.
+- **Bold "Bottom line:" / "Key takeaway:"** after each major block — that line is what a busy reader takes away.
+- Same figure-ordering rule as the full template: most important first (the LabArchives inline budget is spent in document order).
+- Typically 80–120 lines. If it is much longer, it is drifting back toward the full template.
+
+---
+
+## Full report sections (on request)
 
 Place a horizontal rule (`---`) between every section for visual separation in LabArchives.
 All sections in full paragraphs unless noted otherwise.
@@ -66,10 +115,36 @@ Bullet list of unresolved issues, anomalies worth investigating, and follow-up e
 
 **10. Sources**
 Bullet list of all artifacts used, with clickable links where possible:
-- GitHub repo and individual notebooks: link to the GitHub URL provided
+- GitHub repo and individual notebooks: link to the GitHub URL provided. When `metadata.json` has `github_commit_sha`, pin the provenance by citing the 7-char short SHA and the `github_commit_date` as the snapshot date (e.g. "daq@`9f11532`, 2026-02-27").
 - LabArchives pages: page title (link to `https://mynotebook.labarchives.com/` if URL known)
 - Local output files: filename only
 - Images: grouped by source (GitHub images / LabArchives images), listed by filename
+- If `metadata.json` shows `github_tree_truncated: true`, note that some repo files may be missing from this report.
+
+**11. Citations**
+A numbered list mapping each `[n]` marker used in the report to its exact source — a LabArchives page + entry, a notebook cell (`## Cell N` of a file in `notebooks.md`), a data file, a dependency constant, or the DR data. **Every Key Parameters row carries a `[n]`** resolving here; other key numeric claims should too where practical. Never cite a link marked `not_found`/`unreachable` in `link_check.md` — write `[MISSING: <url>]` instead. (This formalizes the `Source` column into checkable claim→source links.)
+
+## The sourcing sidecar — `provenance.md` (both templates)
+
+The full template proves provenance in the reader's face, with a `Source` column and `[n]` markers. The brief template drops both — so provenance moves to a sidecar instead of evaporating. Write `<out_dir>/provenance.md` alongside every report:
+
+```markdown
+# Sources for [UNSIGNED] <experiment_id>
+
+| Value or claim | Where in report | Extracted file | Source line |
+|---|---|---|---|
+| +0.165 dB mean offset at 6.9 GHz | Main Result | extracted_github.md | "Presto 6.9 GHz calibration mean offset: +0.165 dB" |
+| −75 to −83 dBm Presto spur floor | New Finding: spurious tones | extracted_labarchives.md | "spurs at −75 to −83 dBm when active" |
+```
+
+- **One row per numeric value and per substantive claim** in the report body.
+- **Source line** quotes the extracted file, so the critic can match it without re-deriving anything.
+- A value that cannot be given a row does not belong in the report.
+- This file is for the critic and for auditing — it is never uploaded to LabArchives and never shown to the user.
+
+Net effect: the reader gets a clean document and the auditor keeps a complete claim→source map. This is stricter than the old `[n]` scheme, which only required citations on Key Parameters rows.
+
+---
 
 ## Rules
 
@@ -79,6 +154,7 @@ Bullet list of all artifacts used, with clickable links where possible:
 - Distinguish executed operations from stated goals: the Goal vs. Executed map in `connections.md` is authoritative — if a goal appears as "no" there, do not report it as executed; note the gap explicitly
 - Distinguish observed facts from inferences ("the data show..." vs "this suggests...")
 - Never read `[UNSIGNED]` files from the outputs folder as source material — they are prior AI-generated drafts and may contain errors
+- Never cite a link marked `not_found` or `unreachable` in `link_check.md` — write `[MISSING: <url>]` instead of the link
 
 **Claims and strength of language**
 - When using the word "consistent", always specify whether the agreement is qualitative (same trend, same order of magnitude) or quantitative (within X% of predicted value)

@@ -5,6 +5,14 @@ Usage:
     python run.py "<github_url>" "<la_page_1>" "<la_page_2>" ...   # full pipeline
     python run.py "<la_page_1>" "<la_page_2>" ...                   # LabArchives-only
 
+Options:
+    --experiment-id NAME  write to outputs/NAME/ instead of the derived id. Use this
+                          when a run's code lives in another run's GitHub folder, so
+                          it gets its own directory instead of overwriting that run.
+    --out-dir PATH        explicit output directory (overrides --experiment-id)
+    --reuse               write into an existing directory that holds different inputs
+    --force               skip the collision check entirely
+
 The GitHub URL is optional. If omitted, the pipeline fetches LabArchives pages first
 and then scans their content for embedded GitHub links — if any are found, they are
 fetched automatically. If none are found, the pipeline runs in LabArchives-only mode.
@@ -30,15 +38,17 @@ import json
 import os
 import re
 import sys
-from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
-
 import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
 
 from ..config import OUTPUT_ROOT, PROJECT_ROOT, lab_config_value, load_env
 
 load_env()
 
+from ..collect import okf
 from ..collect.dependencies import build_dependencies_md
 from ..collect.summarize import summarize_bundle
 from ..models import (
@@ -47,7 +57,14 @@ from ..models import (
 )
 from ..sources import GitHubAdapter, LabArchivesAdapter
 from ..sources.github import parse_github_url
+from ..retention import figure_hashes as _figure_hashes
 from ..sources.labarchives.auth import cookies_still_valid
+
+# Folder names that describe a container rather than an experiment. A GitHub URL
+# pointing at one of these yields a useless experiment_id (see the override below).
+_GENERIC_FOLDER_NAMES = {"notebooks", "notebook", "scripts", "script", "src", "code",
+                         "data", "analysis", "analyses", "figures", "plots", "results",
+                         "output", "outputs", "daq", "main", "master"}
 
 _ID_STOPWORDS = {"and", "or", "the", "a", "an", "in", "to", "of", "for", "with",
                  "new", "at", "by", "on", "its", "is", "was", "are"}
@@ -76,14 +93,43 @@ _GITHUB_URL_RE = re.compile(r"https?://github\.com/[^\s\)\"'<>]+")
 _BLOB_RE = re.compile(r"(https://github\.com/[^/]+/[^/]+)/blob/([^/]+)/(.*)")
 _REPO_ROOT_RE = re.compile(r"https?://github\.com/[^/]+/[^/?#]+/?$")
 
+# Auto-discovery fetches a URL found inside untrusted LabArchives content, so it
+# is gated in code (not left to the prompt): the host must be GitHub, an optional
+# org allowlist can restrict the owner, and the number of discovered URLs is capped.
+_ALLOWED_GITHUB_HOSTS = frozenset({"github.com", "www.github.com"})
+_MAX_DISCOVERED_URLS = 10
+
+
+def _allowed_github_orgs() -> set[str]:
+    """Optional owner allowlist from lab_config.md ('GitHub orgs', comma-separated).
+
+    Empty (key absent) means no org restriction — any github.com owner is allowed.
+    """
+    raw = lab_config_value("GitHub orgs")
+    return {o.strip().lower() for o in raw.split(",") if o.strip()}
+
+
+def _github_url_allowed(url: str, allowed_orgs: set[str]) -> bool:
+    """Host- and owner-allowlist gate for an auto-discovered GitHub URL."""
+    parts = urlparse(url)
+    if parts.netloc.lower() not in _ALLOWED_GITHUB_HOSTS:
+        return False
+    if allowed_orgs:
+        owner = parts.path.lstrip("/").split("/", 1)[0].lower()
+        if owner not in allowed_orgs:
+            return False
+    return True
+
 
 def _find_github_urls(artifacts: list[CollectedArtifact]) -> list[str]:
     """Scan artifact text content for GitHub URLs.
 
     Normalizes /blob/ref/path/file links to /tree/ref/parent_dir so
     GitHubAdapter can use them directly. Only returns URLs with /tree/ paths.
-    Bare repo root URLs are normalized to /tree/main.
+    Bare repo root URLs are normalized to /tree/main. Results are gated by an
+    allowlist (host, optional org) and capped at _MAX_DISCOVERED_URLS.
     """
+    allowed_orgs = _allowed_github_orgs()
     seen: set[str] = set()
     urls: list[str] = []
     for art in artifacts:
@@ -103,8 +149,15 @@ def _find_github_urls(artifacts: list[CollectedArtifact]) -> list[str]:
                 url = url.rstrip("/") + "/tree/main"
 
             if "/tree/" in url and url not in seen:
+                if not _github_url_allowed(url, allowed_orgs):
+                    print(f"[runner] Skipping discovered GitHub URL (host/org not allowed): {url}")
+                    continue
                 seen.add(url)
                 urls.append(url)
+                if len(urls) >= _MAX_DISCOVERED_URLS:
+                    print(f"[runner] Discovered-URL cap ({_MAX_DISCOVERED_URLS}) reached; "
+                          "ignoring further links.")
+                    return urls
     return urls
 
 
@@ -144,7 +197,122 @@ def _fetch_wiring_diagram() -> str | None:
     return md
 
 
-def run(github_url: str | None, la_pages: list[str]) -> str:
+_re_gh = re.compile(
+    r"github\.com/([^/]+)/([^/]+?)(?:\.git)?(?:/(?:tree|blob)/[^/]+(/.*)?)?/?$"
+)
+
+
+def _gh_identity(url: str | None) -> str:
+    """Identity of a GitHub URL ignoring the ref, so re-fetching the same
+    experiment at a newer commit is not mistaken for a different experiment.
+
+    ``.../owner/repo/tree/<sha>/DAQ/foo`` -> ``owner/repo/DAQ/foo``
+    """
+    if not url:
+        return ""
+    m = _re_gh.search(url.strip())
+    if not m:
+        return url.strip()
+    owner, repo, subpath = m.group(1), m.group(2), (m.group(3) or "").strip("/")
+    return f"{owner}/{repo}/{subpath}".rstrip("/")
+
+
+def _guard_out_dir(
+    out_dir: Path,
+    github_url: str | None,
+    la_pages: list[str],
+    *,
+    reuse: bool = False,
+    force: bool = False,
+) -> None:
+    """Refuse to write a *different* experiment into an existing output directory.
+
+    The experiment id is derived from the GitHub folder name, so two experiments
+    that share a code folder (e.g. a follow-up run whose notebook lives in the
+    previous run's directory) silently collide and the second overwrites the
+    first's metadata.json, destroying its provenance. Catch that here.
+    """
+    meta_path = out_dir / "metadata.json"
+    if force or not meta_path.exists():
+        return
+    try:
+        prev = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:
+        return  # unreadable metadata is not a reason to block a run
+
+    prev_gh, now_gh = _gh_identity(prev.get("github_url")), _gh_identity(github_url)
+    prev_la = sorted(p.strip() for p in (prev.get("la_pages") or []))
+    now_la = sorted(p.strip() for p in la_pages)
+    if prev_gh == now_gh and prev_la == now_la:
+        return  # same experiment — a plain re-run, which is fine
+
+    if reuse:
+        print(f"[runner] --reuse: writing into existing {out_dir.name}/ despite different inputs.")
+        return
+
+    print(
+        f"[runner] REFUSING to overwrite {out_dir.name}/ — it holds a different experiment.\n"
+        f"  existing: github={prev_gh or '(none)'} la_pages={prev_la or '(none)'}\n"
+        f"  this run: github={now_gh or '(none)'} la_pages={now_la or '(none)'}\n"
+        "Writing here would overwrite that run's metadata.json and its provenance.\n"
+        "Choose one:\n"
+        "  --experiment-id <name>   write to a fresh outputs/<name>/ (recommended)\n"
+        "  --reuse                  deliberately add to the existing directory\n"
+        "  --force                  skip this check entirely"
+    )
+    sys.exit(4)
+
+
+def _preflight_guard(
+    github_url: str | None,
+    la_pages: list[str],
+    *,
+    reuse: bool = False,
+    force: bool = False,
+    output_root: Path | None = None,
+) -> None:
+    """Refuse an obvious collision *before* spending a fetch on it.
+
+    The authoritative guard runs after ``summarize()``, because that is where the
+    experiment id is finally known — but by then the fetch is paid for, and an
+    expired cookie would have prompted for Duo on behalf of a run about to be
+    refused. The GitHub folder name is knowable from the URL alone, so the common
+    case is caught in milliseconds; the late guard stays as the backstop for the
+    LabArchives-derived id and for any case where the derived id differs from the
+    folder name.
+    """
+    if not github_url:
+        return
+    probable = github_url.rstrip("/").rsplit("/", 1)[-1]
+    if not probable:
+        return
+    candidate = (Path(output_root) if output_root else Path(OUTPUT_ROOT)) / probable
+    if (candidate / "metadata.json").exists():
+        _guard_out_dir(candidate, github_url, la_pages, reuse=reuse, force=force)
+
+
+def run(
+    github_url: str | None,
+    la_pages: list[str],
+    experiment_id: str | None = None,
+    out_dir_override: Path | None = None,
+    *,
+    reuse: bool = False,
+    force: bool = False,
+) -> str:
+    # Wall-clock stage timing (goal: keep the fetch layer "timely"). Marks are
+    # consecutive; each stage duration is the gap between adjacent marks. The
+    # summary is printed and stored in metadata.json under "fetch_timings_sec".
+    _t_start = time.perf_counter()
+    _marks: list[tuple[str, float]] = [("start", _t_start)]
+
+    def _mark(label: str) -> None:
+        _marks.append((label, time.perf_counter()))
+
+    # 0a. Pre-flight collision check — see _preflight_guard.
+    if not experiment_id and not out_dir_override:
+        _preflight_guard(github_url, la_pages, reuse=reuse, force=force)
+
     # 0. Fail fast on an expired web session BEFORE any fetching. Previously an
     # expired cookie only surfaced after the full text+image fetch, forcing a
     # complete rerun. One probe request catches it in seconds instead.
@@ -175,6 +343,7 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
         with ThreadPoolExecutor(max_workers=min(4, len(la_pages))) as pool:
             for arts in pool.map(lambda p: LabArchivesAdapter(p).fetch(), la_pages):
                 la_artifacts.extend(arts)
+    _mark("labarchives_fetch")
 
     # If no GitHub URL was given, look for one embedded in the LabArchives content
     discovered_urls: list[str] = []
@@ -188,10 +357,12 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
 
     # 2. Fetch GitHub artifacts (if a URL is available)
     github_bundle = None
+    gh_adapter = None
     if github_url:
         print(f"[runner] Fetching GitHub: {github_url}")
         try:
-            github_bundle = GitHubAdapter(github_url).load()
+            gh_adapter = GitHubAdapter(github_url)
+            github_bundle = gh_adapter.load()
         except Exception as exc:
             if discovered_urls and github_url in discovered_urls:
                 # Auto-discovered URL failed — warn and continue LabArchives-only
@@ -206,17 +377,40 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
         # given by the user), the folder name may be a generic subfolder like "notebooks".
         # Override the experiment ID with one derived from the LabArchives page names so
         # the report gets a meaningful name.
-        if discovered_urls and la_pages:
+        # Override the GitHub-derived id when it is uninformative. Two cases:
+        #  - the URL was auto-discovered from LabArchives content, so its folder
+        #    name was never chosen to name an experiment;
+        #  - the folder name is a generic container ("notebooks", "scripts", …),
+        #    which happens whenever a user points at a subdirectory of the real
+        #    experiment folder. That produced an entire run directory literally
+        #    named `outputs/notebooks/` — a 50 MB duplicate of the correctly named
+        #    run, with a report titled "[UNSIGNED] notebooks".
+        generic_name = config.experiment.id.strip().lower() in _GENERIC_FOLDER_NAMES
+        if la_pages and (discovered_urls or generic_name):
             la_id = _la_pages_to_experiment_id(la_pages)
+            why = "auto-discovered URL" if discovered_urls else f"generic folder name {config.experiment.id!r}"
             config = config.model_copy(
                 update={"experiment": config.experiment.model_copy(update={"id": la_id})}
             )
-            print(f"[runner] Overriding experiment_id to LabArchives-derived: {la_id!r}")
+            print(f"[runner] Overriding experiment_id to LabArchives-derived: {la_id!r} ({why})")
+        elif generic_name:
+            print(f"[runner] WARNING: experiment_id {config.experiment.id!r} is a generic folder "
+                  "name and there are no LabArchives pages to derive a better one. "
+                  "Pass --experiment-id <name> to avoid an unidentifiable run directory.")
         bundle = ExperimentBundle(
             root_dir=github_bundle.root_dir,
             config=config,
             collected_artifacts=github_bundle.collected_artifacts + la_artifacts,
         )
+        # Multi-repo (S2): when several GitHub URLs were auto-discovered in the
+        # LabArchives content, fetch the extras too (capped, best-effort) so a
+        # cross-repo experiment is complete instead of dropping all but the first.
+        for extra_url in (discovered_urls[1:] if discovered_urls else [])[:3]:
+            print(f"[runner] Fetching additional discovered repo: {extra_url}")
+            try:
+                bundle.collected_artifacts.extend(GitHubAdapter(extra_url).load().collected_artifacts)
+            except Exception as exc:
+                print(f"[runner] Warning: additional repo fetch failed ({exc}). Skipping.")
     else:
         # LabArchives-only mode — build a minimal bundle
         experiment_id = _la_pages_to_experiment_id(la_pages)
@@ -234,6 +428,8 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
             collected_artifacts=la_artifacts,
         )
 
+    _mark("github_fetch")
+
     # Kick off dependency resolution in the background (network-bound) so it
     # overlaps with summarization and file writing; joined at step 8.
     deps_future = None
@@ -245,14 +441,45 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
 
     # 3. Extract structured content
     summary = summarize_bundle(bundle)
-    out_dir = Path(OUTPUT_ROOT) / summary.output_dirname
+    _mark("summarize")
+    # The experiment id normally comes from the GitHub folder (or the LabArchives
+    # pages in LA-only mode). An explicit --experiment-id/--out-dir wins, so a
+    # follow-up run whose code lives in a previous run's folder can be given its
+    # own directory instead of overwriting that run.
+    dirname = experiment_id or summary.output_dirname
+    out_dir = Path(out_dir_override) if out_dir_override else Path(OUTPUT_ROOT) / dirname
+    if experiment_id or out_dir_override:
+        print(f"[runner] Output directory overridden: {out_dir}")
+    _guard_out_dir(out_dir, github_url, la_pages, reuse=reuse, force=force)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # 4. Save notebook content
-    if summary.notebook_markdown:
-        nb_text = "\n\n---\n\n".join(summary.notebook_markdown)
-        (out_dir / "notebooks.md").write_text(nb_text, encoding="utf-8")
+    # 4. Save notebook content — full serialized cells (code + outputs), one
+    # section per notebook. Previously only markdown cells were written, so the
+    # analysts never saw the code or the result plots (WS1). Title/objective
+    # inference still uses markdown cells (handled in the GitHub adapter).
+    notebook_arts = [
+        a for a in bundle.collected_artifacts
+        if a.kind == "notebook" and a.exists and a.content
+    ]
+    if notebook_arts:
+        sections = [f"# {a.path}\n\n{a.content}" for a in notebook_arts]
+        (out_dir / "notebooks.md").write_text("\n\n---\n\n".join(sections), encoding="utf-8")
         print(f"[runner] Saved notebooks.md")
+
+    # 4b. Save standalone code scripts (.py/.r/.jl/.sh/.sql). Previously these were
+    # fetched but never surfaced to the analysts (S2 ingestion completeness).
+    script_arts = [
+        a for a in bundle.collected_artifacts
+        if a.kind == "code" and a.exists and a.content
+    ]
+    if script_arts:
+        lang = {"py": "python", "r": "r", "jl": "julia", "sh": "bash", "sql": "sql"}
+        sections = []
+        for a in script_arts:
+            suffix = a.path.rsplit(".", 1)[-1].lower() if "." in a.path else ""
+            sections.append(f"# {a.path}\n\n```{lang.get(suffix, '')}\n{a.content}\n```")
+        (out_dir / "scripts.md").write_text("\n\n---\n\n".join(sections), encoding="utf-8")
+        print(f"[runner] Saved scripts.md")
 
     # 5. Save LabArchives notes
     if summary.labarchives_context:
@@ -306,12 +533,18 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
         )
         print(f"[runner] Saved github_images.md")
 
-    # 7. Save data file summaries
+    # 7. Save data file summaries (CSV tables/summaries + binary data files — S2)
     data_parts = []
     if summary.csv_summaries:
         data_parts.extend(summary.csv_summaries)
     if summary.csv_tables:
         data_parts.extend(summary.csv_tables)
+    binary_summaries = [
+        f"**{a.path}** — {a.content}"
+        for a in bundle.collected_artifacts
+        if a.kind == "processed_data" and a.exists and a.content
+    ]
+    data_parts.extend(binary_summaries)
     if data_parts:
         (out_dir / "data_summaries.md").write_text("\n\n".join(data_parts), encoding="utf-8")
         print(f"[runner] Saved data_summaries.md")
@@ -323,32 +556,118 @@ def run(github_url: str | None, la_pages: list[str]) -> str:
             (out_dir / "dependencies.md").write_text(deps_md, encoding="utf-8")
             print(f"[deps] Saved dependencies.md ({len(deps_md):,} chars)")
 
-    # 9. Write metadata for downstream phase scripts
+    _mark("write_and_deps")
+
+    # Per-stage wall-clock durations (seconds) from consecutive marks.
+    timings = {
+        label: round(t - _marks[i][1], 2)
+        for i, (label, t) in enumerate(_marks[1:])
+    }
+    timings["total"] = round(_marks[-1][1] - _t_start, 2)
+
+    # 9. Write metadata for downstream phase scripts (WS2 provenance enrichment)
+    la_entry_count = sum(
+        1 for a in bundle.collected_artifacts
+        if a.source == "labarchives" and a.kind == "notes" and a.content
+    )
+    files_written = sorted(p.name for p in out_dir.iterdir() if p.is_file())
     metadata = {
-        "experiment_id": summary.output_dirname,
+        "experiment_id": out_dir.name,
         "la_pages": la_pages,
         "github_url": github_url or "",
+        "discovered_github_urls": discovered_urls,
+        "github_commit_sha": gh_adapter.commit_sha if gh_adapter else None,
+        "github_commit_date": gh_adapter.commit_date if gh_adapter else None,
+        "github_tree_truncated": gh_adapter.tree_truncated if gh_adapter else False,
+        "la_entry_count": la_entry_count,
+        "run_timestamp": datetime.now().isoformat(timespec="seconds"),
+        "files": files_written,
+        "fetch_timings_sec": timings,
+        # A content hash per figure, so this run stays verifiable. GitHub figures
+        # are already pinned exactly by github_commit_sha, but LabArchives ones
+        # are pinned by nothing — a re-fetch resolves the page by TITLE and takes
+        # whatever is on it now. If the page is edited later, the same filename
+        # can return a different image, and because LA figures are numbered
+        # positionally (img_1, img_5 …) an insertion shifts every later index, so
+        # a citation quietly points at the wrong figure. Comparing these hashes
+        # after a re-fetch turns that from invisible into a reported mismatch.
+        "figure_hashes": _figure_hashes(out_dir),
     }
     (out_dir / "metadata.json").write_text(
         json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"[runner] Saved metadata.json")
 
+    # 10. OKF Phase 1 — make each collection file a self-describing concept and
+    # write index.md, so the run directory is a browsable knowledge bundle.
+    okf.finalize_bundle(
+        out_dir,
+        resource=github_url or "",
+        source_ref=gh_adapter.commit_sha if gh_adapter else None,
+        timestamp=gh_adapter.commit_date if gh_adapter else None,
+        tags=[out_dir.name],
+    )
+    print(f"[runner] Wrote OKF frontmatter + index.md")
+
     print(f"[runner] Output folder: {out_dir}")
     print(f"[runner] Artifacts: {', '.join(e.rsplit(' (', 1)[0] for e in summary.evidence_map)}")
+    print(f"[runner] Fetch timings (s): "
+          + ", ".join(f"{k}={v}" for k, v in timings.items()))
     return str(out_dir)
 
 
+def _parse_args(argv: list[str]) -> tuple[list[str], dict]:
+    """Split argv into positionals and options.
+
+    Options: --experiment-id NAME, --out-dir PATH, --reuse, --force
+    (``--opt=value`` is accepted too).
+    """
+    opts: dict = {"experiment_id": None, "out_dir": None, "reuse": False, "force": False}
+    positional: list[str] = []
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        key, _, inline = arg.partition("=")
+        if key in ("--experiment-id", "--out-dir"):
+            field = "experiment_id" if key == "--experiment-id" else "out_dir"
+            if inline:
+                opts[field] = inline
+                i += 1
+            elif i + 1 < len(argv):
+                opts[field] = argv[i + 1]
+                i += 2
+            else:
+                print(f"[runner] {key} needs a value")
+                sys.exit(1)
+            continue
+        if key in ("--reuse", "--force"):
+            opts[key.lstrip("-")] = True
+            i += 1
+            continue
+        positional.append(arg)
+        i += 1
+    return positional, opts
+
+
 def main() -> None:
-    args = sys.argv[1:]
-    if not args:
+    positional, opts = _parse_args(sys.argv[1:])
+    if not positional:
         print(__doc__)
         sys.exit(1)
+    out_dir_override = Path(opts["out_dir"]) if opts["out_dir"] else None
     # First arg is a GitHub URL if it starts with http and contains github.com
-    if args[0].startswith("http") and "github.com" in args[0]:
-        run(args[0], args[1:])
+    if positional[0].startswith("http") and "github.com" in positional[0]:
+        github_url, la_pages = positional[0], positional[1:]
     else:
-        run(None, args)
+        github_url, la_pages = None, positional
+    run(
+        github_url,
+        la_pages,
+        experiment_id=opts["experiment_id"],
+        out_dir_override=out_dir_override,
+        reuse=opts["reuse"],
+        force=opts["force"],
+    )
 
 
 if __name__ == "__main__":

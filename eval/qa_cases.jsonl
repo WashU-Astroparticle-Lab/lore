@@ -1,0 +1,6 @@
+{"q": "What is the mean Qc measured on the 9 devices (with meaningful response to quantum capacitance) in BE260416?", "expect_page": "la_page:20260702_JPL_QPDs", "note": "chip ID only in hyperlink filenames; the bug that started this eval"}
+{"q": "WH2 KID temperature sweep results", "expect_page": "la_page:20251111_WH2_KID", "note": "short device ID (WH2) — needs min-length-3 identifier detection"}
+{"q": "JKID power timestream measurement", "expect_page": "la_page:20260429_JKID_Power_Timestream", "note": "concept/keyword resolution; LA page must not be crowded out by outputs/ dirs"}
+{"q": "SQUAT LED cabling and cooldown run", "expect_page": "la_page:20260409_Cabling_and_Cooldown_SQUAT_LED_WashU_QPD_New_JKID5x", "note": "codename resolution via keyword (SQUAT is pure-alpha, not an identifier)"}
+{"q": "results for chip ZZ999999", "expect_no_id": true, "note": "negative: a made-up ID must NOT falsely resolve to any page"}
+{"q": "what was the readout power at 3 GHz and 40 dB attenuation", "expect_no_id": true, "note": "negative: measurement values (3ghz, 40db) are NOT identifiers"}

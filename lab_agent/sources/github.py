@@ -11,13 +11,14 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 from ..collect.discover import build_artifact_group, synthesize_config, infer_title_from_notebook, infer_objective_from_notebook
+from ..collect.binary import DATA_BINARY_SUFFIXES as _DATA_BINARY_SUFFIXES, summarize_binary
 from ..collect.ingest import (
     TEXT_SUFFIXES,
     csv_rows_from_text,
     csv_table_from_rows,
     iter_all_artifacts,
     notebook_markdown_from_content,
-    notebook_text_from_content,
+    serialize_notebook,
 )
 from ..models import Artifact, CollectedArtifact, ExperimentBundle
 
@@ -76,6 +77,10 @@ class GitHubAdapter:
         # {relative_path: bytes} snapshot of the experiment folder, populated by
         # _load_tarball(). When set, _fetch_bytes serves from it with no HTTP.
         self._file_cache: dict[str, bytes] | None = None
+        # Provenance (WS2), populated during load().
+        self.commit_sha: str | None = None
+        self.commit_date: str | None = None
+        self.tree_truncated: bool = False
 
     # ------------------------------------------------------------------
     # Low-level fetch helpers
@@ -201,6 +206,7 @@ class GitHubAdapter:
             else:
                 paths.append(item_path)
         if data.get("truncated"):
+            self.tree_truncated = True
             print(
                 f"[GitHub] WARNING: tree response was truncated for {self._url}. "
                 "Some files may be missing from the report. "
@@ -208,6 +214,23 @@ class GitHubAdapter:
                 flush=True,
             )
         return paths
+
+    def _resolve_commit(self) -> None:
+        """Resolve the ref to a concrete commit SHA + date via one API call.
+
+        Best-effort: on any failure the provenance fields stay None and the
+        pipeline proceeds. Stamped onto every collected artifact so citations and
+        freshness checks can name the exact snapshot the numbers came from.
+        """
+        try:
+            data = self._fetch_api(f"commits/{self.ref}")
+        except Exception as exc:  # noqa: BLE001 — provenance is non-fatal
+            print(f"[GitHub] Could not resolve commit for {self.ref!r}: {exc}")
+            return
+        if isinstance(data, dict):
+            self.commit_sha = data.get("sha")
+            author = (data.get("commit") or {}).get("author") or {}
+            self.commit_date = author.get("date")
 
     # ------------------------------------------------------------------
     # Artifact collection
@@ -218,40 +241,66 @@ class GitHubAdapter:
         "svg", "pdf", "pkl", "npy", "npz", "hdf5", "h5", "parquet", "feather",
     })
 
-    def _collect(self, artifact: Artifact) -> CollectedArtifact:
-        """Fetch and parse one artifact from GitHub."""
+    def _collect(self, artifact: Artifact) -> list[CollectedArtifact]:
+        """Fetch and parse one artifact from GitHub.
+
+        Returns a list because a notebook yields its own artifact plus one
+        ``figure`` artifact per code-cell output image (saved alongside committed
+        images so the analysts can open the actual result plots).
+        """
         suffix = artifact.path.lower().rsplit(".", 1)[-1] if "." in artifact.path else ""
 
         if suffix in self._IMAGE_SUFFIXES:
             print(f"[GitHub] Downloading image: {artifact.path}")
             raw = self._fetch_bytes(artifact.path)
-            return CollectedArtifact(
+            return [CollectedArtifact(
                 path=artifact.path, kind=artifact.type,
                 description=artifact.description, exists=raw is not None,
                 raw_bytes=raw, source="github",
-            )
+            )]
 
         if suffix in self._BINARY_SUFFIXES:
-            return CollectedArtifact(
+            # Data binaries (.npy/.npz/.h5/…) get a short shape/dtype summary so they
+            # aren't opaque to the analysts (S2); figures (.pdf/.svg) stay as-is.
+            if suffix in _DATA_BINARY_SUFFIXES:
+                raw = self._fetch_bytes(artifact.path)
+                content = summarize_binary(artifact.path, raw) if raw is not None else None
+                return [CollectedArtifact(
+                    path=artifact.path, kind=artifact.type,
+                    description=artifact.description, exists=raw is not None,
+                    content=content, source="github",
+                )]
+            return [CollectedArtifact(
                 path=artifact.path, kind=artifact.type,
                 description=artifact.description, exists=True, source="github",
-            )
+            )]
 
         text = self._fetch(artifact.path)
         if text is None:
-            return CollectedArtifact(
+            return [CollectedArtifact(
                 path=artifact.path, kind=artifact.type,
                 description=artifact.description, exists=False, source="github",
-            )
+            )]
 
         markdown_cells: list[str] = []
         csv_rows: list[list[str]] = []
         content: str | None = None
+        image_artifacts: list[CollectedArtifact] = []
 
         if artifact.type == "notebook" and suffix == "ipynb":
             try:
-                content = notebook_text_from_content(text)
+                stem = artifact.path.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+                prefix = re.sub(r"[^0-9A-Za-z]+", "_", stem) + "_"
+                content, cell_images = serialize_notebook(text, image_prefix=prefix)
                 markdown_cells = notebook_markdown_from_content(text)
+                for name, img_bytes in cell_images:
+                    # path == bare filename so run.py saves it into github_images/<name>,
+                    # matching the [output image: github_images/<name>] marker in the text.
+                    image_artifacts.append(CollectedArtifact(
+                        path=name, kind="figure", source="github", exists=True,
+                        description=f"cell output image from {artifact.path}",
+                        raw_bytes=img_bytes,
+                    ))
             except Exception as exc:
                 print(f"[GitHub] Warning: could not parse notebook {artifact.path!r}: {exc}", flush=True)
                 content = text  # fall back to raw JSON so Claude still has the content
@@ -262,12 +311,13 @@ class GitHubAdapter:
         elif f".{suffix}" in TEXT_SUFFIXES or suffix in ("py", "r", "jl", "m", "sh"):
             content = text
 
-        return CollectedArtifact(
+        notebook_artifact = CollectedArtifact(
             path=artifact.path, kind=artifact.type,
             description=artifact.description, exists=True,
             content=content, markdown_cells=markdown_cells,
             csv_rows=csv_rows, source="github",
         )
+        return [notebook_artifact, *image_artifacts]
 
     # ------------------------------------------------------------------
     # Public interface
@@ -304,12 +354,14 @@ class GitHubAdapter:
         self._load_tarball()
         artifacts = list(iter_all_artifacts(provisional_config))
         with ThreadPoolExecutor(max_workers=min(8, max(1, len(artifacts)))) as pool:
-            collected = list(pool.map(self._collect, artifacts))
+            # _collect returns a list (notebook + its output images); flatten.
+            collected = [a for sub in pool.map(self._collect, artifacts) for a in sub]
 
-        # Step 5 — re-rank primary notebook by code cell count
+        # Step 5 — re-rank primary notebook by code cell count. Count real code-cell
+        # headers in the serialized content (robust to '[code]' appearing in output text).
         def _code_cells(path: str) -> int:
             art = next((a for a in collected if a.path == path and a.kind == "notebook"), None)
-            return (art.content or "").count("[code]") if art else 0
+            return len(re.findall(r"(?m)^## Cell \d+ \[code\]", art.content or "")) if art else 0
 
         if artifact_group.primary_execution and artifact_group.supporting_context:
             primary_count = _code_cells(artifact_group.primary_execution[0].path)
@@ -342,6 +394,14 @@ class GitHubAdapter:
             inferred_title=inferred_title,
             inferred_objective=inferred_objective,
         )
+
+        # Provenance — resolve the commit once and stamp every artifact (WS2).
+        self._resolve_commit()
+        if self.commit_sha:
+            ref_str = f"{self.owner}/{self.repo}@{self.commit_sha[:7]}"
+            for a in collected:
+                a.source_ref = ref_str
+                a.updated_at = self.commit_date
 
         return ExperimentBundle(
             root_dir=self._url,

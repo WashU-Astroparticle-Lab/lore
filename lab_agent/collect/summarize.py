@@ -2,38 +2,98 @@ from __future__ import annotations
 
 import csv
 import io
+import statistics
+from datetime import datetime
 
 from ..models import CollectedArtifact, ExperimentBundle, StructuredSummary
 
 # CSVs with more data rows than this are summarised rather than rendered as a table.
 _LARGE_CSV_THRESHOLD = 20
 
+_TS_FORMATS = (
+    "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S.%f",   # fractional seconds
+    "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d",
+    "%m/%d/%Y", "%m/%d/%Y %H:%M:%S", "%Y/%m/%d %H:%M:%S",
+)
+
+
+def _looks_like_timestamp(s: str) -> bool:
+    s = s.strip()
+    if not s:
+        return False
+    for fmt in _TS_FORMATS:
+        try:
+            datetime.strptime(s, fmt)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _md_table(header: list[str], rows: list[list[str]]) -> str:
+    n = len(header)
+
+    def esc(v: str) -> str:
+        return str(v).replace("|", "\\|")
+
+    out = ["| " + " | ".join(esc(c) for c in header) + " |",
+           "| " + " | ".join("---" for _ in header) + " |"]
+    for r in rows:
+        padded = (list(r) + [""] * n)[:n]
+        out.append("| " + " | ".join(esc(c) for c in padded) + " |")
+    return "\n".join(out)
+
 
 def _summarize_large_csv(path: str, rows: list[list[str]]) -> str:
-    """Return a concise one-paragraph summary for a CSV too large to render as a table."""
+    """Summarise a CSV too large to render in full: per-column stats, non-numeric
+    value samples, timestamp ranges, and the first/last few rows verbatim (WS6)."""
     if len(rows) < 2:
         return f"**{path}** — empty CSV."
     header = rows[0]
     data = rows[1:]
-    col_names = ", ".join(header)
+    n = len(header)
 
-    ranges: list[str] = []
-    for col_i, col_name in enumerate(header):
-        vals: list[float] = []
-        for row in data:
-            if len(row) > col_i:
-                try:
-                    vals.append(float(row[col_i]))
-                except ValueError:
-                    pass
-        if vals:
-            ranges.append(f"{col_name}: [{min(vals):.4g}, {max(vals):.4g}]")
+    lines: list[str] = [
+        f"**{path}** — {len(data)} rows × {n} columns.",
+        f"Columns: {', '.join(header)}.",
+        "",
+        "Per-column:",
+    ]
+    for ci, cname in enumerate(header):
+        col_vals = [row[ci] for row in data if len(row) > ci and row[ci] != ""]
+        nums: list[float] = []
+        non_numeric = 0
+        for v in col_vals:
+            try:
+                nums.append(float(v))
+            except ValueError:
+                non_numeric += 1
+        if nums and non_numeric == 0:
+            lines.append(
+                f"- **{cname}** (numeric, n={len(nums)}): min={min(nums):.4g}, "
+                f"max={max(nums):.4g}, mean={statistics.fmean(nums):.4g}, "
+                f"median={statistics.median(nums):.4g}")
+        elif nums:
+            lines.append(
+                f"- **{cname}** (mixed, {len(nums)} numeric / {non_numeric} non-numeric): "
+                f"numeric min={min(nums):.4g}, max={max(nums):.4g}")
+        elif col_vals and _looks_like_timestamp(col_vals[0]) and _looks_like_timestamp(col_vals[-1]):
+            lines.append(f"- **{cname}** (timestamp): first={col_vals[0]}, last={col_vals[-1]}")
+        else:
+            distinct = list(dict.fromkeys(col_vals))
+            shown = ", ".join(distinct[:8])
+            more = f" (+{len(distinct) - 8} more distinct)" if len(distinct) > 8 else ""
+            lines.append(f"- **{cname}** (text): {shown}{more}")
 
-    range_str = "; ".join(ranges) if ranges else "no numeric columns"
-    return (
-        f"**{path}** — {len(data)} rows × {len(header)} columns ({col_names}).\n"
-        f"Numeric ranges: {range_str}."
-    )
+    lines += ["", "First rows:", _md_table(header, data[:3])]
+    if len(data) > 3:
+        lines += ["", "Last rows:", _md_table(header, data[-3:])]
+    lines += [
+        "",
+        f"_Full data not included ({len(data)} rows > {_LARGE_CSV_THRESHOLD}-row "
+        "threshold) — per-row claims are unverifiable from this summary._",
+    ]
+    return "\n".join(lines)
 
 
 def summarize_bundle(bundle: ExperimentBundle) -> StructuredSummary:

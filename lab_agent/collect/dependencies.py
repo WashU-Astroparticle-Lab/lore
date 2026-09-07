@@ -12,6 +12,7 @@ Output: dependencies.md in the experiment output folder.
 """
 from __future__ import annotations
 
+import ast
 import base64
 import json
 import os
@@ -62,7 +63,7 @@ class ImportInfo(NamedTuple):
 # ---------------------------------------------------------------------------
 
 def _extract_imports(source: str) -> list[ImportInfo]:
-    """Extract (package, submodule, names) from Python source."""
+    """Regex fallback import scan (used when a cell won't ast.parse)."""
     results: list[ImportInfo] = []
     for line in source.splitlines():
         line = line.strip()
@@ -84,23 +85,129 @@ def _extract_imports(source: str) -> list[ImportInfo]:
     return results
 
 
-def _collect_imports_from_notebooks(bundle_artifacts) -> dict[str, list[ImportInfo]]:
-    """Return {package: [ImportInfo, ...]} for all non-standard imports in notebooks.
+def _extract_imports_ast(source: str) -> list[ImportInfo]:
+    """Extract imports via AST (handles multiline/parenthesized imports, aliases).
 
-    Artifacts store notebook content as flat text (all cells labelled by type),
-    so we scan the text directly for import lines rather than parsing JSON.
+    Strips IPython magics (`%…`, `!…`) first; on any SyntaxError falls back to the
+    line regex. Relative imports (``from . import x``) are intra-package, not
+    external dependencies, so they are skipped.
+    """
+    cleaned = "\n".join(
+        ln for ln in source.splitlines() if not ln.lstrip().startswith(("%", "!"))
+    )
+    try:
+        tree = ast.parse(cleaned)
+    except SyntaxError:
+        return _extract_imports(cleaned)
+    results: list[ImportInfo] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                results.append(ImportInfo(alias.name.split(".")[0], "", []))
+        elif isinstance(node, ast.ImportFrom):
+            if node.level and not node.module:
+                continue  # relative import — skip
+            parts = (node.module or "").split(".")
+            names = [a.name for a in node.names]
+            results.append(ImportInfo(
+                parts[0], ".".join(parts[1:]) if len(parts) > 1 else "", names))
+    return results
+
+
+_CODE_HEADER_RE = re.compile(r"^## Cell \d+ \[code\]")
+
+
+def _code_blocks_from_serialized(content: str) -> list[str]:
+    """Recover per-cell code sources from serialized notebook text (WS1 format).
+
+    Captures lines under each ``## Cell N [code]`` header up to the next cell or
+    an ``### Output`` block, so import scanning never sees output text.
+    """
+    blocks: list[str] = []
+    cur: list[str] | None = None
+    for line in content.splitlines():
+        if _CODE_HEADER_RE.match(line):
+            if cur:
+                blocks.append("\n".join(cur))
+            cur = []
+        elif line.startswith("## Cell ") or line.startswith("### Output"):
+            if cur:
+                blocks.append("\n".join(cur))
+            cur = None
+        elif cur is not None:
+            cur.append(line)
+    if cur:
+        blocks.append("\n".join(cur))
+    return blocks
+
+
+def _collect_imports_from_notebooks(bundle_artifacts) -> dict[str, list[ImportInfo]]:
+    """Return {package: [ImportInfo, ...]} for non-standard imports in notebooks and
+    standalone .py scripts.
+
+    Notebook code cells are recovered from the serialized content and AST-parsed per
+    cell (so imports are read from code only, not from captured output text — WS1);
+    standalone .py scripts are AST-parsed directly (S2 ingestion completeness).
     """
     all_imports: dict[str, list[ImportInfo]] = {}
     for art in bundle_artifacts:
-        if not (art.path.endswith(".ipynb") and art.content):
+        if not art.content:
             continue
-        for imp in _extract_imports(art.content):
-            if imp.package in _SKIP_PACKAGES:
-                continue
-            if imp.package not in all_imports:
-                all_imports[imp.package] = []
-            all_imports[imp.package].append(imp)
+        if art.path.endswith(".ipynb"):
+            blocks = _code_blocks_from_serialized(art.content)
+        elif art.path.endswith(".py"):
+            blocks = [art.content]
+        else:
+            continue
+        for block in blocks:
+            for imp in _extract_imports_ast(block):
+                if not imp.package or imp.package in _SKIP_PACKAGES:
+                    continue
+                all_imports.setdefault(imp.package, []).append(imp)
     return all_imports
+
+
+def _render_symbols(source: str, wanted: set[str]) -> str | None:
+    """Symbol-targeted rendering of a dependency source file, or None if unparseable.
+
+    Emits the module docstring's first line, every top-level constant assignment
+    (hardware constants are exactly what the Dependencies Analyst needs), and the
+    full source of the specifically imported symbols; everything else is a one-line
+    stub list. Returns None on SyntaxError so the caller can fall back to a slice.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+    lines: list[str] = []
+    doc = ast.get_docstring(tree)
+    if doc:
+        lines += [f"**Module docstring:** {doc.strip().splitlines()[0]}", ""]
+
+    consts: list[str] = []
+    wanted_defs: list[tuple[str, str]] = []
+    other_defs: list[str] = []
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            if any(isinstance(t, ast.Name) for t in node.targets):
+                seg = ast.get_source_segment(source, node)
+                if seg and len(seg) < 300:
+                    consts.append(seg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if node.name in wanted:
+                seg = ast.get_source_segment(source, node)
+                if seg:
+                    wanted_defs.append((node.name, seg))
+            else:
+                other_defs.append(node.name)
+
+    if consts:
+        lines += ["**Top-level constants:**", "```python", *consts, "```", ""]
+    for name, seg in wanted_defs:
+        lines += [f"**`{name}` (imported):**", "```python", seg, "```", ""]
+    if other_defs:
+        lines.append("_Other top-level definitions: " + ", ".join(sorted(other_defs)) + "._")
+    return "\n".join(lines).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -339,20 +446,22 @@ def build_dependencies_md(bundle_artifacts, owner: str) -> str | None:
             lines.append("")
             continue
 
+        wanted = set(imported_names)
         for filename, content in source_files.items():
-            # Truncate very long files to keep dependencies.md readable
-            content_lines = content.splitlines()
-            truncated = False
-            if len(content_lines) > 200:
-                content_lines = content_lines[:200]
-                truncated = True
             lines.append(f"### `{filename}`")
             lines.append("")
-            lines.append("```python")
-            lines.extend(content_lines)
-            if truncated:
-                lines.append(f"# ... ({len(content.splitlines()) - 200} more lines truncated)")
-            lines.append("```")
+            rendered = _render_symbols(content, wanted)
+            if rendered is not None:
+                # Symbol-targeted: docstring + constants + the imported symbols' source.
+                lines.append(rendered)
+            else:
+                # Unparseable — fall back to the first 200 lines.
+                content_lines = content.splitlines()
+                lines.append("```python")
+                lines.extend(content_lines[:200])
+                if len(content_lines) > 200:
+                    lines.append(f"# ... ({len(content_lines) - 200} more lines truncated)")
+                lines.append("```")
             lines.append("")
 
     return "\n".join(lines)

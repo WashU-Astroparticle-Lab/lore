@@ -10,13 +10,38 @@ Read the `[UNSIGNED]` report, all `extracted_*.md`, and `connections.md` in `<ou
 
 ## Checklist (experiment reports)
 
-1. Every numeric value in the report's Key Parameters table matches the value in the extracted file its **Source** column cites — one of extracted_github.md, extracted_deps.md, extracted_labarchives.md, or extracted_dr.md. FAIL a value ONLY if it appears in none of the extracted files (i.e. it is unsourced/invented). Legitimately lab-sourced values (RF attenuation, DAC_CURRENT, hand-recorded saturation amplitudes, reference-clock offsets from lab notes) are NOT failures.
+1. **Every numeric value in the report is sourced.** Check against `<out_dir>/provenance.md`, the sidecar the report-writer emits for both templates: each numeric value in the report body must have a row there, and the quoted **Source line** must actually appear in the extracted file that row names (extracted_github.md, extracted_deps.md, extracted_labarchives.md, extracted_dr.md). FAIL a value only if it appears in none of the extracted files — i.e. it is unsourced or invented. Legitimately lab-sourced values (RF attenuation, DAC_CURRENT, hand-recorded saturation amplitudes, reference-clock offsets from lab notes) are NOT failures. If `provenance.md` is absent, that alone is a FAIL — provenance is not optional just because the brief template has no visible citations. (A *full*-template report additionally carries a `Source` column; check it agrees with the sidecar.)
 2. No figure description in the report contains visual content not present in the corresponding Figures sub-section of an extracted file.
-3. "Confirms" is not used unless connections.md documents a direct quantitative comparison that supports it.
+3. **"Confirms"/"confirmed" is earned.** Two separate checks:
+   - `connections.md` documents a direct quantitative comparison that supports it; and
+   - **the same finding does not also say the thing cannot be determined.** A heading
+     reading "ADC saturation is the *confirmed* cause of the distorted cloud" two sentences
+     above "it cannot be determined … whether the amplifier itself is compressing or whether
+     the ADC is the first element to clip" is a FAIL. Both sentences shipped in one finding
+     because this item only looked for sourcing.
+   When judging the Slack summary (item 10), do **not** justify a "confirmed" by pointing at
+   a report heading that uses the same word — check the evidence, not the echo. That circular
+   reasoning is how the contradiction above passed.
 4. No step is described as executed that appears in the Goal vs. Executed map in connections.md as "no".
 5. No physics mechanism is named that does not appear in any extracted file.
-6. The Key Parameters table appears exactly once in the report.
-7. The Key Findings section does not restate sentences that already appear in Results.
+6. **The report uses the template that was in effect.** Brief is the default
+   (`docs/report_style_guide.md`); the full template applies only when the request said
+   "full" or "detailed". So:
+   - **Brief in effect** → the report must have **no** `Table of Contents`, `Key Parameters`,
+     `Methods and Workflow` or `Citations` section, and should be ~80–120 lines. Any of those
+     four sections present, or a body well past ~120 lines, is a **FAIL** — say which sections
+     to cut. This is the whole point of the default and it was missed once: 183 lines with all
+     four sections, while this item read "Key Parameters appears exactly once" and passed it.
+   - **Full in effect** → a Key Parameters table must appear exactly once.
+   If the spawning prompt does not say which template was requested, assume **brief**.
+7. No section restates sentences that already appear in another section (in the full template this is Key Findings vs Results; in the brief template it is a **Bottom line:** repeating its own paragraph verbatim).
+8. **No dead link is cited as a source.** If `link_check.md` exists in `<out_dir>`, the report cites no URL marked `not_found` or `unreachable` there.
+9. **Citations resolve.** If the report has a `# Citations` section (full template), every `[n]` marker in the body resolves to a numbered entry and every Key Parameters row carries a citation. For a brief-template report there are no markers — instead every row of `provenance.md` must name a real extracted file, and no row may be a placeholder.
+10. **The Slack summary matches the report.** `<out_dir>/slack_summary.md` must exist. Check it line by line against the report — it is posted to the lab verbatim and is the only part most readers see, so it gets the same scrutiny as the report itself:
+    - every number in it appears in the report with the **same value, same units, and attached to the same label** (frequency, instrument, device, power level). A number paired with the wrong label is a FAIL, not a nitpick — e.g. reporting the 6.9 GHz offset against 6.44 GHz.
+    - every claim carries **at least as much hedging as the report**. If the report says "consistent with", the summary saying "confirms"/"confirmed" is a FAIL. This applies even when the report earned that hedge through a revision.
+    - no claim appears that is absent from the report.
+    Quote the offending summary line and the report line it contradicts.
 
 ## Checklist (DR-only reports — when the spawning prompt says so)
 
@@ -26,4 +51,11 @@ Read the `[UNSIGNED]` report, all `extracted_*.md`, and `connections.md` in `<ou
 
 ## Output
 
-End `critique.md` with a `## Summary` line: `PASS` (all items passed) or `FAIL` (list the failing item numbers).
+Write per-item `PASS`/`FAIL` above, then end `critique.md` with a `## Summary` line stating exactly one outcome:
+
+- `passed` — every checklist item passed.
+- `gaps_found: <item numbers>` — one or more items failed but are fixable by editing the report (unsourced value, dead link cited, duplicated section, overclaim). This triggers the one revision pass.
+- `expert_needed: <the specific question>` — a checklist item cannot be adjudicated from the extracted files (e.g. two sources give conflicting numbers with no way to decide which is right). Name the exact question a human must answer. Do **not** guess.
+- `human_needed: <what is broken>` — inputs are unusable (missing extracted files, unreadable report); no report edit can fix it.
+
+Use `passed`/`gaps_found` for normal quality issues; reserve `expert_needed`/`human_needed` for the genuine cases above.

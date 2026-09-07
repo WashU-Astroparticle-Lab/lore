@@ -11,6 +11,9 @@ Thumbs.db
 # Pipeline outputs
 outputs/
 
+# Cross-run knowledge bundle (OKF Phase 3) — local per-machine memory
+knowledge/
+
 # Slack session logs and temp prompt files
 slack_sessions.log
 session_logs/
@@ -44,10 +47,25 @@ build/
 # Jupyter
 .ipynb_checkpoints/
 
-# Claude Code project state (machine-local) — but agent definitions are
-# part of the pipeline and ARE committed (.claude/agents/).
+# Claude Code project state (machine-local) — but agent definitions and
+# skills are part of the pipeline and ARE committed (.claude/agents/,
+# .claude/skills/). CLAUDE.md is a router that depends on the skills, so
+# they MUST ship together or the lab machine gets a router with nothing to
+# invoke.
 .claude/*
 !.claude/agents/
+!.claude/skills/
 
 # Local caches (page index, wiring diagram, org repos)
 cache/
+
+# Runtime artefacts dropped in the repo root by the pipeline
+# (Slack image downloads, scratch plots) — not code.
+slack_upload_*.jpg
+slack_upload_*.png
+output.png
+
+# Scratch dir for Slack message bodies (--text-file). A report run left six
+# tmp_*.txt progress posts loose in the repo root; they belong here.
+.lore_tmp/
+tmp_*.txt

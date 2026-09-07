@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import textwrap
 import threading
 import time
@@ -28,6 +29,9 @@ SESSION_TIMEOUT = 40 * 60  # Kill sessions still running after 40 minutes
 _active_sessions: list[dict] = []
 _seen_timestamps: set[str] = set()   # dedup: one session per Slack message ts
 _sessions_lock   = threading.Lock()
+# Requests to re-spawn as a FRESH session after a resume failed. Filled under the lock by the
+# reaper; drained outside the lock (spawn_claude re-acquires it) so there is no deadlock.
+_pending_retries: list[dict] = []
 
 
 # ── Claude session persistence (thread_ts → Claude Code session UUID) ─────────
@@ -130,25 +134,33 @@ def _reap_nolock() -> None:
                         api.post_message(s["channel"], s["thread_ts"], body)
             elif not s.get("timed_out"):
                 tail = read_log_tail(log_path) if log_path else ""
-                resume_error_keywords = ("no conversation found", "session not found",
-                                         "unknown session", "could not resume")
                 limit_keywords = ("hit your limit", "rate limit", "usage limit",
                                   "too many requests", "overloaded")
-                if s.get("resume_of") and any(k in tail.lower() for k in resume_error_keywords):
-                    # The stored Claude session is gone — drop the mapping so the
-                    # next message in this thread starts a fresh session.
+                if any(k in tail.lower() for k in limit_keywords):
+                    api.post_message(s["channel"], s["thread_ts"],
+                        f"<@{s['user']}> I hit the daily token limit mid-pipeline and stopped. "
+                        "The report is incomplete — try again after your limit resets.")
+                elif s.get("resume_of") and s.get("user_text"):
+                    # A RESUMED session failed (the stored Claude session often can't be
+                    # resumed after a listener restart / expiry, dying before it writes any
+                    # useful log). Don't surface a cryptic error — drop the mapping and
+                    # transparently re-run the SAME request as a FRESH session. The retry
+                    # has resume_of=None, so if it also fails it falls through to the normal
+                    # error path (no retry loop). Queued here, spawned after the lock frees.
                     forget_session(s["thread_key"])
-                    msg = (f"<@{s['user']}> I lost the saved context for this thread "
-                           "(the session expired). Please resend your last message and "
-                           "I'll pick it up fresh.")
-                elif any(k in tail.lower() for k in limit_keywords):
-                    msg = (f"<@{s['user']}> I hit the daily token limit mid-pipeline and stopped. "
-                           "The report is incomplete — try again after your limit resets.")
+                    _seen_timestamps.discard(s.get("current_ts"))
+                    _pending_retries.append({
+                        "user": s["user"], "text": s["user_text"], "channel": s["channel"],
+                        "thread_ts": s.get("orig_thread_ts"), "current_ts": s.get("current_ts"),
+                        "is_dm": s.get("is_dm", False),
+                    })
+                    print(f"[resume-fallback] resume failed for thread {s['thread_key']}; "
+                          "retrying as a fresh session", flush=True)
                 else:
                     log_name = Path(log_path).name if log_path else "unknown"
-                    msg = (f"<@{s['user']}> The session ended unexpectedly (exit {exit_code}). "
-                           f"Check session log: `{log_name}`")
-                api.post_message(s["channel"], s["thread_ts"], msg)
+                    api.post_message(s["channel"], s["thread_ts"],
+                        f"<@{s['user']}> The session ended unexpectedly (exit {exit_code}). "
+                        f"Check session log: `{log_name}`")
             _active_sessions.remove(s)
             # Clean up the prompt file now that the session is over
             pf = s.get("prompt_file")
@@ -165,15 +177,98 @@ def _reap_nolock() -> None:
             _seen_timestamps.discard(ts)
 
 
+def _drain_retries() -> None:
+    """Spawn any queued fresh-session retries OUTSIDE the lock (spawn_claude re-locks)."""
+    while True:
+        with _sessions_lock:
+            if not _pending_retries:
+                return
+            spec = _pending_retries.pop(0)
+        try:
+            spawn_claude(**spec)
+        except Exception as exc:  # noqa: BLE001 — a bad retry must not kill the reaper
+            print(f"[resume-fallback] retry spawn failed: {exc}", flush=True)
+
+
 def reap_finished() -> None:
     with _sessions_lock:
         _reap_nolock()
+    _drain_retries()
 
 
 def reaper_loop() -> None:
     while True:
         time.sleep(30)
         reap_finished()
+
+
+# ── Nightly knowledge-graph refresh ────────────────────────────────────────────
+#
+# The KG must be re-indexed as pages change, but a full rebuild is expensive, so
+# `build_kb --index` re-indexes only new/changed pages (manifest-driven; unchanged
+# pages cost no LLM tokens). We run that refresh from inside the always-on listener
+# so there is one long-lived process to keep alive. The standalone Task Scheduler
+# job (LORE-KG-nightly) is kept as a fallback; the cross-process build lock in
+# lab_agent.rag.build_lock ensures the two never build at the same time.
+
+KG_REFRESH_HOUR = int(os.environ.get("KB_REFRESH_HOUR", "2"))  # local hour, 0–23
+
+
+def _run_kg_refresh() -> None:
+    """Run one incremental KG refresh as a subprocess (plan auth, not API)."""
+    # Same env scrub as session spawns: the build LLM (`claude -p`) must use the
+    # Claude Code plan, not ANTHROPIC_API_KEY.
+    child_env = os.environ.copy()
+    for _var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        child_env.pop(_var, None)
+
+    logs_dir = PROJECT_ROOT / "session_logs"
+    logs_dir.mkdir(exist_ok=True)
+    log_path = logs_dir / "kg_refresh.log"
+
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(f"\n=== KG refresh started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        log.flush()
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "lab_agent.cli.build_kb", "--index"],
+            cwd=str(PROJECT_ROOT),
+            stdout=log,
+            stderr=log,
+            env=child_env,
+        )
+        proc.wait()
+    print(f"[kg-refresh] finished (exit {proc.returncode}); log: {log_path.name}", flush=True)
+    # Tell the warm KG service to reload the freshly-rebuilt graph (best-effort; no-op if the
+    # service isn't running). Otherwise it would keep serving the pre-refresh graph until restart.
+    if proc.returncode == 0:
+        try:
+            from ..rag.service import trigger_reload
+            if trigger_reload():
+                print("[kg-refresh] signaled warm KG service to reload.", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[kg-refresh] reload signal failed: {exc}", flush=True)
+
+
+def kg_refresh_loop() -> None:
+    """Fire an incremental KG refresh once per day at KG_REFRESH_HOUR (local time).
+
+    Checks every 5 minutes; runs at most once per calendar day. A failed refresh
+    is logged and retried the next day — it never takes the listener down. The
+    build lock makes a same-day double-run (e.g. after a listener restart, or the
+    Task Scheduler fallback firing too) safe and near-free.
+    """
+    last_run_date: tuple[int, int, int] | None = None
+    while True:
+        now = time.localtime()
+        today = (now.tm_year, now.tm_mon, now.tm_mday)
+        if now.tm_hour == KG_REFRESH_HOUR and today != last_run_date:
+            last_run_date = today
+            print("[kg-refresh] nightly window reached — starting incremental build", flush=True)
+            try:
+                _run_kg_refresh()
+            except Exception as exc:  # noqa: BLE001 — a bad refresh must not kill the listener
+                print(f"[kg-refresh] refresh failed: {exc}", flush=True)
+        time.sleep(300)  # re-check every 5 minutes
 
 
 # ── Log tail reader ──────────────────────────────────────────────────────────
@@ -235,7 +330,6 @@ def spawn_claude(
         history_label = "Conversation history — full thread, oldest first"
 
     reply_to_str = f"channel={channel}, thread_ts={reply_ts}"
-    post_data_py: dict = {"channel": channel, "thread_ts": reply_ts, "text": "<message>"}
 
     # Resume the thread's existing Claude session when its transcript survives;
     # a resumed session already holds the full conversation and pipeline state,
@@ -254,22 +348,19 @@ def spawn_claude(
             Continue from wherever you left off. Never repeat completed steps — if run.py
             outputs or extracted_*.md files already exist, do not regenerate them.
 
+            A request to change a report already written ("make it shorter", "drop the key
+            parameters") is a revision of the REPORT — report-writer, critic, upload, summary,
+            per experiment-report's revision section. Not an edit of your own reply.
+
             Delivery rules (unchanged): your final text output is delivered to Slack
-            automatically after you exit — do NOT post the final reply yourself. Post
-            mid-pipeline progress updates via Python chat.postMessage as before:
-              python -c "
-import json, urllib.request
-from dotenv import dotenv_values
-token = dotenv_values('{PROJECT_ROOT}/.env')['SLACK_BOT_TOKEN']
-data = json.dumps({post_data_py}).encode()
-req = urllib.request.Request('https://slack.com/api/chat.postMessage', data=data, method='POST')
-req.add_header('Authorization', f'Bearer {{token}}')
-req.add_header('Content-Type', 'application/json')
-urllib.request.urlopen(req, timeout=10)
-"
+            automatically after you exit — do NOT post the final reply yourself. A report's
+            final output is <out_dir>/slack_summary.md verbatim, never prose you compose.
+            Post mid-pipeline progress updates with the CLI:
+              python -m lab_agent.cli.slack post --channel {channel} --thread {reply_ts} --text-file <path>
         """).strip()
         return _launch(user, channel, reply_ts, current_ts, prompt, resume_id=resume_id,
-                       thread_key=thread_key)
+                       thread_key=thread_key, orig_thread_ts=thread_ts, user_text=text,
+                       is_dm=is_dm)
 
     history_str = fetch_history(channel, thread_ts, current_ts)
 
@@ -284,105 +375,52 @@ urllib.request.urlopen(req, timeout=10)
         Session ID    : {session_id}
         Latest message: {text}
         Reply-to      : {reply_to_str}
+        Project root  : {PROJECT_ROOT}
 
         {history_label} (empty means this is a new conversation):
         {history_str}
 
-        IMPORTANT — how responses are delivered:
-        Your final response is delivered to Slack automatically by the system after you exit.
-        Just write your response as normal text output. Do NOT try to post your final reply
-        to Slack yourself.
+        FIRST ACTION, before you answer anything: read CLAUDE.md in the project root, classify
+        the request per its routing table, and invoke the matching skill with the Skill tool.
+        CLAUDE.md and .claude/skills/ are the only pipeline instructions — this prompt does not
+        restate them, and deliberately so. It used to, and the copy went stale: it was still
+        telling sessions to ask "Full report or brief?" after that question was removed for
+        causing full-template reports, and still telling them to "go straight to writing a fresh
+        report from the existing files" when the skill forbids writing a report outside
+        report-writer. A session answered a revision request with zero tool calls, twice,
+        because this prompt's routing had no case for it and its own text was easier to reach
+        than the file.
 
-        For MID-PIPELINE progress updates only (e.g. "Fetching data...", "Writing report..."),
-        post using Python — do NOT use curl (it is unreliable on Windows):
-          python -c "
-import json, urllib.request
-from dotenv import dotenv_values
-token = dotenv_values('{PROJECT_ROOT}/.env')['SLACK_BOT_TOKEN']
-data = json.dumps({post_data_py}).encode()
-req = urllib.request.Request('https://slack.com/api/chat.postMessage', data=data, method='POST')
-req.add_header('Authorization', f'Bearer {{token}}')
-req.add_header('Content-Type', 'application/json')
-urllib.request.urlopen(req, timeout=10)
-"
+        Answering from this prompt alone is the failure mode. If the request touches an
+        experiment, a report, a figure or the lab's past work, you cannot answer it correctly
+        without the skill — the history above is a record of the conversation, not a source of
+        facts about the data.
 
-        Searching Slack for experiment context (only when the user's request is vague and you need
-        to find a GitHub URL, LabArchives page name, or experiment name — not for general browsing):
-          python -c "
-import json, urllib.request, urllib.parse
-from dotenv import dotenv_values
-token = dotenv_values('{PROJECT_ROOT}/.env')['SLACK_BOT_TOKEN']
-qs = urllib.parse.urlencode({{'query': '<term>', 'count': '5'}})
-req = urllib.request.Request(f'https://slack.com/api/search.messages?{{qs}}')
-req.add_header('Authorization', f'Bearer {{token}}')
-with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
-"
+        A request to CHANGE a report already written ("make it shorter", "drop the key
+        parameters", "the goal was really X") is a revision **of the report**, not an edit of
+        your own reply. It runs the full path in experiment-report's revision section:
+        report-writer, then the critic, then the upload, then the summary. Shortening your Slack
+        message changes nothing the user asked about.
 
-        What to do:
-        - Read CLAUDE.md in the project root for the full pipeline instructions.
-        - The conversation history above is the live record of this Slack chat, fetched directly
-          from Slack right now. "(new conversation)" means the user started a fresh chat — clean slate.
-        - You also have persistent memory files on disk (in memory/ next to CLAUDE.md) that carry
-          background knowledge across sessions: project state, pipeline facts, rules, etc.
-        - When the user asks "what do you remember?" or similar, answer only from the conversation
-          history above. Do not surface or mention persistent memory files — those are background
-          context for you, not something to recite to the user.
-        - Don't repeat questions that are already answered in the history.
-        - If info is still missing, ask naturally for just the missing piece.
-        - For questions or chat, answer warmly and helpfully. Keep replies short and conversational.
+        How your reply is delivered:
+        Your final text output is posted to Slack automatically after you exit. Do NOT post the
+        final reply yourself — that double-posts. For a report, your final output is the verbatim
+        contents of <out_dir>/slack_summary.md, plus only <@{user}> and a one-line timing
+        summary. Read that file; never compose a summary from what the subagents told you.
+        (`slack post-summary` is for sending a summary to a CHANNEL, where nothing auto-posts.)
 
-        IMPORTANT — check thread history before running the pipeline:
-        Each Slack reply spawns a fresh session. Read the conversation history carefully to
-        determine what stage the pipeline is at before doing anything:
+        For mid-pipeline progress updates, use the CLI (never a hand-written python -c with a
+        token in it, and never curl):
+          python -m lab_agent.cli.slack post --channel {channel} --thread {reply_ts} --text-file <path>
+        Write the message body with the Write tool into .lore_tmp/ first.
 
-        - If history shows the bot asked about DR conditions and the latest message is the
-          user's answer (yes with a date/window, or no): the fetch and Phase A analysis are
-          already done. Do NOT re-check credentials, re-run run.py, or re-run Phase A. The
-          outputs/<experiment_id>/ files (including extracted_*.md) already exist — resolve
-          the DR answer per CLAUDE.md Step 2b and continue from Phase B.
-
-        - If history shows the report was already uploaded, and the user is asking to redo it:
-          check whether outputs/<experiment_id>/ already has the data files (labarchives.md,
-          notebooks.md, etc.). If yes, skip run.py entirely and go straight to writing a
-          fresh report from the existing files.
-
-        - Only run run.py if no output files exist yet, or if the user explicitly asks to
-          re-fetch the data.
-
-        Pipeline steps and Slack progress updates (only for a fresh pipeline run):
-
-          1. FIRST, before anything else (unless the user's request already answered it):
-             Post the DR question via Python and continue immediately — do NOT wait:
-               "While I fetch the data — would you like dilution refrigerator conditions
-               included in this report? If yes, reply with the date and time window of your
-               measurement (e.g. 'Feb 18 2025' or 'Feb 18 2025, 14:00–22:00'). If not,
-               just say 'no'."
-          2. Post: "Checking credentials..." then check .env.
-          3. Post: "Fetching GitHub and LabArchives data..." then run run.py.
-             If run.py reports expired cookies, run `python get_la_cookies.py` immediately
-             (never ask the user), then post: "Session cookies refreshed, retrying fetch..."
-             and rerun run.py.
-          4. Immediately after run.py completes: post "Data fetched — analyzing..." and
-             spawn the Phase A analysts (CLAUDE.md Step 3) WITHOUT waiting for the DR answer.
-          5. When Phase A finishes, check the thread for the user's DR answer
-             (conversations.replies via Python, using the Reply-to coordinates above):
-             - yes + date/window → fetch DR data and run dr-analyst (CLAUDE.md Step 2b)
-             - no → continue
-             - no answer yet → write the Step 2b reminder as your final text output and
-               exit; the next session continues from Phase B.
-          6. Post: "Writing report..." then run Phases B, C, D per CLAUDE.md.
-          7. After saving the report file:
-             Post: "Report written. Uploading to LabArchives..."
-          8. After upload completes, write your final summary as normal text output
-             (do NOT post it yourself — the system delivers your final output automatically).
-             Include: what experiment was reported, key findings (2-3 bullets), confirmation
-             it's live in LabArchives under the upload folder, tagging <@{user}>.
-
-        Project root: {PROJECT_ROOT}
+        Everything else — credentials, run.py, the phase agents, the gate, the upload, Slack
+        search, cookie refresh — is in CLAUDE.md and the skill you invoke. Go read it.
     """).strip()
 
     _launch(user, channel, reply_ts, current_ts, prompt, resume_id=None,
-            thread_key=thread_key, session_id=session_id)
+            thread_key=thread_key, session_id=session_id, orig_thread_ts=thread_ts,
+            user_text=text, is_dm=is_dm)
 
 
 def _launch(
@@ -395,8 +433,15 @@ def _launch(
     resume_id: str | None,
     thread_key: str,
     session_id: str | None = None,
+    orig_thread_ts: str | None = None,
+    user_text: str = "",
+    is_dm: bool = False,
 ) -> None:
-    """Reserve a session slot and spawn the claude process (fresh or resumed)."""
+    """Reserve a session slot and spawn the claude process (fresh or resumed).
+
+    ``orig_thread_ts``/``user_text``/``is_dm`` are the original request inputs, stashed on the
+    slot so the reaper can re-spawn a fresh session verbatim if a resume fails.
+    """
     session_id = session_id or uuid.uuid4().hex[:8]
 
     # ── Atomic dedup + cap check ─────────────────────────────────────────────
@@ -451,6 +496,10 @@ def _launch(
             "timed_out":  False,
             "thread_key": thread_key,
             "resume_of":  resume_id,
+            "current_ts": current_ts,
+            "orig_thread_ts": orig_thread_ts,
+            "user_text":  user_text,
+            "is_dm":      is_dm,
         }
         _active_sessions.append(slot)
 

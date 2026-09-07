@@ -154,6 +154,15 @@ def _html_to_text(html: str) -> str:
     return stripper.get_text()
 
 
+def _entry_field(entry: ET.Element, names: tuple[str, ...]) -> str | None:
+    """First non-empty child text among *names* (guarded — returns None if absent)."""
+    for n in names:
+        v = entry.findtext(n)
+        if v and v.strip():
+            return v.strip()
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Adapter
 # ---------------------------------------------------------------------------
@@ -355,10 +364,16 @@ class LabArchivesAdapter(ImageDownloadMixin):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _parse_entries_xml(xml_text: str) -> list[tuple[str, str]]:
-        """Return [(caption_or_type, plain_text_content), …] for each entry."""
+    def _parse_entries_xml(xml_text: str) -> list[dict]:
+        """Return [{label, content, eid, created, updated}, …] for each entry.
+
+        Provenance fields (eid/created/updated) are best-effort: the LabArchives
+        XML tag names for entry id/timestamps vary, so several common variants are
+        tried and missing ones fall back to None (never breaks parsing).
+        TODO: confirm the exact tags against one raw get_entries_for_page dump.
+        """
         root = ET.fromstring(xml_text)
-        results: list[tuple[str, str]] = []
+        results: list[dict] = []
         for entry in root.findall(".//entry"):
             label = (
                 entry.findtext("caption")
@@ -369,7 +384,13 @@ class LabArchivesAdapter(ImageDownloadMixin):
             raw = entry.findtext("entry-data") or ""
             content = _html_to_text(raw) if raw and "<" in raw else raw
             if content:
-                results.append((label.strip(), content.strip()))
+                results.append({
+                    "label": label.strip(),
+                    "content": content.strip(),
+                    "eid": _entry_field(entry, ("eid", "id", "entry-id", "tree-id")),
+                    "created": _entry_field(entry, ("created-at", "created_at", "entry-created", "created")),
+                    "updated": _entry_field(entry, ("updated-at", "updated_at", "entry-modified", "modified-at", "updated")),
+                })
         return results
 
     # ------------------------------------------------------------------
@@ -519,12 +540,15 @@ class LabArchivesAdapter(ImageDownloadMixin):
                 CollectedArtifact(
                     path=f"labarchives://{ref}/{i}",
                     kind="notes",
-                    description=f"LabArchives entry: {label}",
+                    description=f"LabArchives entry: {e['label']}",
                     exists=True,
-                    content=content,
+                    content=e["content"],
                     source="labarchives",
+                    source_ref=e.get("eid"),
+                    created_at=e.get("created"),
+                    updated_at=e.get("updated"),
                 )
-                for i, (label, content) in enumerate(entries)
+                for i, e in enumerate(entries)
             ]
 
         if not include_images:

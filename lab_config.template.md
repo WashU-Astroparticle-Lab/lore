@@ -8,6 +8,7 @@ The pipeline agent reads `lab_config.md` at startup — do not commit it.
 | Key | Value |
 |-----|-------|
 | PROJECT_ROOT | /path/to/your/LORE/checkout |
+| PYTHON | <absolute path to the interpreter that has the project's dependencies, e.g. C:/Users/you/miniconda3/python.exe> |
 
 ## Required .env keys
 
@@ -31,3 +32,9 @@ The following keys must be present in `.env`. The agent checks these by name:
 | Other notebooks | Additional notebook names, comma-separated |
 | Upload folder | Folder name inside the primary notebook where reports are uploaded |
 | Wiring diagram page | Page title of your fridge wiring / RF attenuation diagram |
+
+## Security (optional)
+
+| Key | Value |
+|-----|-------|
+| GitHub orgs | Comma-separated owner allowlist for GitHub URLs auto-discovered inside LabArchives pages (e.g. `WashU-Astroparticle-Lab`). Leave blank to allow any github.com owner. |

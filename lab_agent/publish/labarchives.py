@@ -16,6 +16,8 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+import datetime as _dt
+import json as _json
 import re as _re
 
 import markdown as _md
@@ -119,6 +121,38 @@ def _find_upload_folder(adapter) -> tuple[str, str]:
         f"Could not find '{folder_name}' folder in '{notebook_name}' notebook. "
         "Please create it in LabArchives first."
     )
+
+
+def _find_page_in_folder(adapter, nbid: str, folder_tree_id: str, title: str) -> str | None:
+    """Return the tree_id of an existing page named *title*, or None.
+
+    Without this, every upload creates a new page, so re-uploading a revised
+    report leaves several pages sharing one title and no way to tell which is
+    current.
+    """
+    want = title.strip().lower()
+    try:
+        nodes = adapter._get_tree_level(nbid, folder_tree_id)
+    except Exception as exc:
+        print(f"[upload] Warning: could not list existing pages ({exc}); will create a new page.")
+        return None
+    for node in nodes:
+        label = (node.findtext("display-text") or "").strip().lower()
+        if label == want:
+            return node.findtext("tree-id") or None
+    return None
+
+
+def _notebook_url(nbid: str) -> str:
+    """Notebook-level LabArchives URL.
+
+    Deliberately not a deep link to the page: LabArchives' web page IDs do not
+    map to API tree_ids (see CLAUDE.md 'Known limitation'), so a per-page URL
+    cannot be constructed from what the API returns. Naming the folder and page
+    title alongside this link is honest and still gets a reader there in two
+    clicks — better than inventing a URL that 404s.
+    """
+    return f"https://mynotebook.labarchives.com/{nbid}"
 
 
 def _insert_page(nbid: str, parent_tree_id: str, title: str) -> str:
@@ -314,28 +348,61 @@ def _post_overflow_images(nbid: str, page_tree_id: str, overflow_srcs: list[str]
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def upload_report(out_dir: Path, page_title: str) -> str:
-    """Upload the report in *out_dir* to the configured LabArchives folder.
+def resolve_report_path(out_dir: Path, report_file: str | Path | None = None) -> Path:
+    """Pick the report to upload.
 
-    Steps:
-      1. Find the upload folder (lab_config.md `Upload folder`) in the
-         primary notebook (lab_config.md `Primary notebook`).
-      2. Create a new page named *page_title* inside it.
-      3. Convert the report Markdown to HTML and post as a rich-text entry.
-      4. Attach the raw .md file.
-
-    Returns the new page's tree_id.
+    *report_file* (absolute, or relative to *out_dir*) wins when given — an
+    output directory can hold several reports (e.g. a full one and a
+    plain-language one), and "newest [UNSIGNED] by mtime" silently picks the
+    wrong one.
     """
-    # Find the report file — prefer newest [UNSIGNED] *.md, fall back to experiment_report.md
+    if report_file:
+        path = Path(report_file)
+        if not path.is_absolute():
+            path = out_dir / path
+        if not path.exists():
+            raise FileNotFoundError(f"Report not found: {path}")
+        return path
+
     # Note: can't use glob("[UNSIGNED]*") — brackets are treated as character classes
     unsigned_files = sorted(
         (f for f in out_dir.glob("*.md") if f.name.startswith("[UNSIGNED]")),
         key=lambda f: f.stat().st_mtime,
         reverse=True,
     )
-    report_path = unsigned_files[0] if unsigned_files else out_dir / "experiment_report.md"
-    if not report_path.exists():
-        raise FileNotFoundError(f"Report not found: {report_path}")
+    path = unsigned_files[0] if unsigned_files else out_dir / "experiment_report.md"
+    if not path.exists():
+        raise FileNotFoundError(f"Report not found: {path}")
+    if len(unsigned_files) > 1:
+        print(
+            f"[upload] {len(unsigned_files)} reports in {out_dir.name}/ — picking the newest "
+            f"({path.name}). Pass --report-file to choose explicitly."
+        )
+    return path
+
+
+def upload_report(
+    out_dir: Path,
+    page_title: str,
+    report_file: str | Path | None = None,
+    new_page: bool = False,
+) -> dict:
+    """Upload the report in *out_dir* to the configured LabArchives folder.
+
+    Steps:
+      1. Find the upload folder (lab_config.md `Upload folder`) in the
+         primary notebook (lab_config.md `Primary notebook`).
+      2. Reuse the page named *page_title* if it already exists there, else
+         create it. (Pass ``new_page=True`` to always create.)
+      3. Convert the report Markdown to HTML and post as a rich-text entry.
+      4. Attach the raw .md file.
+
+    Returns a dict describing where the report landed: ``page_tree_id``,
+    ``page_title``, ``folder``, ``notebook_url``, ``created`` and ``report_file``.
+    Callers need this to tell the reader where to look — previously only a
+    tree_id came back, which is not something a human can follow.
+    """
+    report_path = resolve_report_path(out_dir, report_file)
 
     md_text = report_path.read_text(encoding="utf-8")
 
@@ -372,10 +439,23 @@ def upload_report(out_dir: Path, page_title: str) -> str:
     print(f"[upload] Locating '{_upload_folder_name()}' folder in LabArchives…")
     adapter = _get_adapter()
     nbid, folder_tree_id = _find_upload_folder(adapter)
-    print(f"[upload] Found folder. Creating page: {page_title!r}")
 
-    page_tree_id = _insert_page(nbid, folder_tree_id, page_title)
-    print(f"[upload] Page created (tree_id={page_tree_id[:40]}…)")
+    existing = None if new_page else _find_page_in_folder(adapter, nbid, folder_tree_id, page_title)
+    if existing:
+        page_tree_id = existing
+        created = False
+        print(f"[upload] Page {page_title!r} already exists — adding a revision to it "
+              "(use new_page=True to create a duplicate instead).")
+        # LabArchives entries are append-only through this API, so a revision is
+        # posted as a new entry rather than replacing the old one. The header
+        # makes it obvious which entry on the page is current.
+        stamp = _dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        html = f"<p><strong>Revised {stamp}</strong></p>\n" + html
+    else:
+        created = True
+        print(f"[upload] Creating page: {page_title!r}")
+        page_tree_id = _insert_page(nbid, folder_tree_id, page_title)
+        print(f"[upload] Page created (tree_id={page_tree_id[:40]}…)")
 
     print("[upload] Posting report as rich-text entry…")
     try:
@@ -403,5 +483,28 @@ def upload_report(out_dir: Path, page_title: str) -> str:
     print("[upload] Attaching raw .md file…")
     _add_attachment(nbid, page_tree_id, report_path)
 
-    print(f"[upload] Done — report uploaded to LabArchives / {_upload_folder_name()} / {page_title!r}")
-    return page_tree_id
+    folder = _upload_folder_name()
+    result = {
+        "page_tree_id": page_tree_id,
+        "page_title": page_title,
+        "folder": folder,
+        "notebook_url": _notebook_url(nbid),
+        "created": created,
+        "report_file": report_path.name,
+    }
+    verb = "uploaded to" if created else "revised on"
+    print(f"[upload] Done — {report_path.name} {verb} LabArchives / {folder} / {page_title!r}")
+    print(f"[upload] Notebook: {result['notebook_url']}  (page: {folder} / {page_title})")
+
+    # Record where this landed so later sessions can cite the location instead of
+    # guessing a URL.
+    meta_path = out_dir / "metadata.json"
+    if meta_path.exists():
+        try:
+            meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+            meta["labarchives_upload"] = result
+            meta_path.write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            print(f"[upload] Warning: could not record upload location in metadata.json ({exc})")
+
+    return result

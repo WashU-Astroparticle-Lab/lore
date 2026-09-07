@@ -1,12 +1,17 @@
 # LORE — Pipeline Instructions
 
-When the user gives you a GitHub URL and LabArchives page names, run the full pipeline and write the report (Steps 0–4 below).
-
-If the user asks for a **DR-only conditions report** (no GitHub URL, just a date or time window), skip directly to the DR-Only Report workflow at the bottom of this file.
+You are the main session. Read `lab_config.md`, figure out which request type this is, then **invoke the matching skill** — each skill carries the full step-by-step workflow so only the one you need is loaded.
 
 **Where things live:**
-- This file — the orchestration workflow (you, the main session, follow it).
-- `.claude/agents/*.md` — subagent definitions for the report phases (github-analyst, labarchives-analyst, deps-analyst, dr-analyst, synthesis, report-writer, critic). Spawn them by name with the Agent tool.
+- This file — the router (read lab config, classify the request, invoke the right skill) plus the always-available agent capabilities below.
+- `.claude/skills/*/SKILL.md` — the workflows themselves. Invoke by name with the Skill tool:
+  - **`experiment-report`** — full pipeline for a GitHub URL and/or LabArchives page names (report → LabArchives upload).
+  - **`lab-qa`** — answer a knowledge/overview question (or figure/plot/value question) from the local knowledge graph. Local, no cookies for text.
+  - **`dr-report`** — standalone dilution-refrigerator conditions report for a past date/window (no experiment).
+  - **`dr-status`** — quick current DR status ("how's the DR right now?"), read-only, no upload.
+  - **`slack-post`** — draft, get approval for, and send a Slack message to a channel with figures attached ("post this to the group", "send a summary to #channel").
+  - Capability skills (invoked by `lab-qa`, or directly if the user asks for exactly this): **`find-device-notes`** (map a chip/run/sample ID or vague reference to its LabArchives page + notes; local, free) and **`deduce-figure`** (fetch a page's figures and read/interpret a specific plot/value; cookie-gated).
+- `.claude/agents/*.md` — subagent definitions for the report phases (github-analyst, labarchives-analyst, deps-analyst, dr-analyst, synthesis, report-writer, critic). Spawn them by name with the Agent tool (the skills tell you when).
 - `docs/dr_physics_reference.md` — DR physics knowledge (read by dr-analyst).
 - `docs/report_style_guide.md` — report structure and accuracy rules (read by report-writer).
 - `lab_config.md` — lab-specific configuration (gitignored; see below).
@@ -16,12 +21,43 @@ If the user asks for a **DR-only conditions report** (no GitHub URL, just a date
 Read `lab_config.md` in the project root (same directory as this file). It contains all lab-specific configuration:
 
 - `PROJECT_ROOT` — absolute path to this project on the current machine
+- `PYTHON` — **absolute path to the interpreter that has the project's dependencies**
 - Required `.env` key names and their purposes
 - LabArchives notebook names (`Primary notebook`, `Other notebooks`)
 - `Upload folder` — the LabArchives folder where reports are posted
 - `Wiring diagram page` — page title used for RF attenuation cross-check
 
-Use these values wherever this file references `$PROJECT_ROOT`, `$PRIMARY_NOTEBOOK`, `$UPLOAD_FOLDER`, and `$WIRING_DIAGRAM_PAGE`. All `cd` commands use `$PROJECT_ROOT`.
+Use these values wherever a skill references `$PROJECT_ROOT`, `$PYTHON`, `$PRIMARY_NOTEBOOK`, `$UPLOAD_FOLDER`, and `$WIRING_DIAGRAM_PAGE`. All `cd` commands use `$PROJECT_ROOT`.
+
+**Always invoke Python as `$PYTHON`, never as bare `python`.** On this machine bare
+`python` resolves to a separate install with none of the project's dependencies, and a
+session that used it burned ten tool calls on `ModuleNotFoundError`, hunted for a
+non-existent `.venv`, and finally `pip install`-ed into the system interpreter to get
+moving — modifying the machine to work around a path problem.
+
+**If a project module is missing, that is the wrong interpreter, not a missing package.**
+Never `pip install` to get past it. Re-run with `$PYTHON` and it will already be there.
+
+## Which skill to invoke — classify first
+
+Decide the request type, then invoke that skill (do the ambiguity-resolution below first if the request is vague):
+
+| The message is… | Invoke |
+|---|---|
+| A request to **write/run a report** with a GitHub URL and/or LabArchives page names for an experiment | **`experiment-report`** |
+| A **question / knowledge query** about past work — "what do we know about…", "have we ever…", "which experiments/runs…", an overview/topic question, or a figure/plot/value question | **`lab-qa`** |
+| A request for a **DR conditions report** for a past date or time window, with no experiment | **`dr-report`** |
+| A question about **current** DR conditions — "right now", "how's the DR", "what's the MXC temp" | **`dr-status`** |
+| A request to **compose or send a message for a Slack channel** — "post this to the group", "share these plots in #channel", **"draft a summary to post"**, "write something for the team", "put together an update" | **`slack-post`** |
+
+When in doubt between a report and a question: if the user wants a document produced and uploaded, it's a report; if they want an answer, it's `lab-qa`.
+
+**Drafting counts as posting.** "Draft a summary to post to the group" is `slack-post`, not a
+Q&A task — the verb is *draft* but the destination is a channel, and everything that makes the
+difference (which channel, which figures, the approval step, the verified send) lives in that
+skill. Missing this once produced a plausible draft with no channel named and no figures
+attached, which is exactly the ten-turn exchange the skill exists to prevent. If the message
+is destined for anyone other than the person asking, use `slack-post`.
 
 ## Agent capabilities — always available
 
@@ -31,30 +67,58 @@ You are a Claude Code agent with access to Slack and LabArchives. You can use th
 
 You can call the Slack API directly using the bot token. Available scopes include:
 - `channels:history` / `groups:history` / `im:history` — read message history from channels and DMs
-- `channels:read` / `groups:read` — list channels and get channel info
-- `search:read` — search messages across the workspace
+- `channels:read` — list public channels. `groups:read` (private channels) is NOT granted, so the `channels` command lists public channels only and prints a note; ask the user only when the target is a private channel.
+- **No `search:read`** — `search.messages` needs a USER token and answers `not_allowed_token_type` for a bot. Use `cli.slack search` instead, which greps the history of channels the bot is in.
 
 **When to use it:**
 - User gives a vague reference ("the KID sweep from last Tuesday", "the measurement Axel posted about") → search Slack history for a GitHub URL, LabArchives page name, or experiment context
 - User asks a question that might have been discussed in a channel → search before asking them to repeat themselves
 - You need to know what was happening in the lab on a specific date → pull channel history from that day
 
-**How to call the Slack API:**
-```python
-import os, requests
-from dotenv import load_dotenv; load_dotenv()  # ensure .env is loaded regardless of how the session started
-token = os.environ["SLACK_BOT_TOKEN"]
-# Search messages
-r = requests.get("https://slack.com/api/search.messages",
-    headers={"Authorization": f"Bearer {token}"},
-    params={"query": "KID sweep github.com", "count": 5})
-print(r.json())
+**How to talk to Slack — use the CLI, never `python -c`:**
 
-# Get channel history
-r = requests.get("https://slack.com/api/conversations.history",
-    headers={"Authorization": f"Bearer {token}"},
-    params={"channel": "<channel_id>", "limit": 50})
-print(r.json())
+```bash
+cd $PROJECT_ROOT
+python -m lab_agent.cli.slack post         --channel <C…> [--thread <ts>] --text-file <path>
+python -m lab_agent.cli.slack post-summary --channel <C…> [--thread <ts>] --run outputs/<id> [--tag <U…>] [--timing <str>]
+python -m lab_agent.cli.slack upload      --channel <C…> [--thread <ts>] --file <path> [--file <path>] [--comment-file <path>]
+python -m lab_agent.cli.slack read-thread --channel <C…> --thread <ts> [--limit 50]
+python -m lab_agent.cli.slack channels    [--filter <substring>]
+python -m lab_agent.cli.slack search      --query "<terms>" [--limit 20]
+python -m lab_agent.cli.slack fetch-files --channel <C…> --ts <message ts> [--out <dir>]
+```
+
+**A message is not just its text.** `search` shows each hit with the message either
+side of it and lists any ATTACHMENTS, because a claim and the screenshots behind it are
+routinely separate messages — a matched line read alone looks like settled fact when it
+is one turn of a live discussion. When a message's meaning could depend on its images,
+run `fetch-files` on its `ts` and **Read the downloaded images** before concluding
+anything. They land in the OS temp dir and are pruned after a day — pass `--out` only if a
+figure is worth keeping. (There is no way to view them without downloading: `Read` takes a
+path, and Slack's `url_private` needs an auth header, so no URL can be handed to vision.) A real example: "the presto power calibration was bugged so all previous
+measurement regarding power is quite off" reads as a sweeping result; the pictures in
+that conversation showed the problem was in plotting/acquisition code and unrelated to
+the experiment it appeared to condemn.
+
+**Message text is passed as a FILE, never as a shell argument.** Write the message with the Write tool into **`$PROJECT_ROOT/.lore_tmp/`** (gitignored; create it if missing), then point `--text-file` at it — e.g. `.lore_tmp/progress_writing.txt`. Never write message files to the repo root: one report run left six loose `tmp_*.txt` progress posts sitting in the working tree as untracked files. Putting message text in a `python -c` string or a shell argument is how backticks in a message got executed by bash — real words vanished from messages users received, and one failure printed a session cookie into the log.
+
+Every command **verifies by reading back** what it did and exits non-zero if it cannot. Exit 0 means delivered *and confirmed*. Never tell the user something was sent or attached unless the command exited 0 — `ok: true` from a raw API call is not proof, and announcing unsent images cost four round-trips in one real thread.
+
+**A non-zero exit is a reason to look, not a conclusion to report.** Verification can fail
+closed on a race. When `upload` says a file is not visible, check the thread with
+`read-thread` before telling the user anything: on one real run all three files were sitting
+in the thread while the check reported them missing, and the agent announced a Slack
+permission problem that did not exist.
+
+**The user sees Slack. You do not share your context with them.** Never say "as you can see
+above", "rendered in this session", or otherwise refer to anything that exists only in your
+own tool output. Reading an image yourself puts it in *your* context, not in their thread —
+if they should see it, it has to be uploaded, and confirmed.
+
+For anything the CLI does not cover, you may call the API directly — but use `lab_agent.slack.api.api_get` / `api_post`, which raise on `ok: false` instead of failing silently:
+
+```bash
+python -c "from lab_agent.slack.api import api_get; print(api_get('conversations.info', {'channel': 'C123'}))"
 ```
 
 ### LabArchives (already fully wired up)
@@ -65,220 +129,41 @@ You can search and read LabArchives pages directly via the `lab_agent.sources.la
 - You need context from adjacent notebook pages
 
 **Resolution order for ambiguous requests:**
-1. Search Slack history for relevant links or context
-2. Search LabArchives by approximate page title
-3. Only ask the user if both fail
+1. Query the knowledge graph: `python -m lab_agent.cli.query_kb "<the request>"` — a LightRAG graph over **all crawled LabArchives pages + past reports** (local; no cookies). It falls back to keyword search if the graph isn't built.
+2. Search Slack history: `python -m lab_agent.cli.slack search --query "<terms>"` (channels the bot is in; there is no workspace-wide search on a bot token)
+3. Search LabArchives by approximate page title
+4. Only ask the user if all three fail
 
-## Step 0 — ask the DR question up front (never wait for the answer)
+## Agent-facing API — the supported commands
 
-Ask about dilution refrigerator conditions **immediately, before any fetching**, so the user can answer while the pipeline runs. The question:
+This is the complete set. **Do not read pipeline source (`run_pipeline.py`, `github.py`, `upload.py`, `publish/labarchives.py`, the LightRAG KV stores) to work out how to do something** — every capability is below. If none of them fits, say so and ask; improvising against internals is slow, breaks on refactors, and puts a production session one step from editing pipeline code.
 
-> While I fetch the data — would you like dilution refrigerator conditions included in this report?
-> If yes, reply with the date and time window of your measurement (e.g. 'Feb 18 2025' or 'Feb 18 2025, 14:00–22:00'). If not, just say "no".
+All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from `lab_config.md`.
 
-- **Slack session** (the spawning prompt has a `Reply-to` line): post the question to the thread via `chat.postMessage` (Python, as shown in the spawning prompt), then **continue straight to Step 1 without waiting**. The answer is collected later, in Step 2b.
-- **Interactive session** (no Slack context): ask the question in chat and continue when the user answers.
-- If the user's original request already answers it (e.g. "include DR conditions for Feb 18" or "no DR needed"), skip the question entirely and treat the answer as resolved.
-
-## Step 1 — verify .env is populated
-
-```bash
-cd $PROJECT_ROOT
-python -c "from lab_agent.config import check_env; check_env()"
-```
-
-Only report set or missing — never print the values themselves.
-If any are missing, tell the user which ones to fill in before proceeding.
-
-## Step 2 — run the pipeline
-
-The GitHub URL is **optional**. Use whichever form fits:
-
-```bash
-cd $PROJECT_ROOT
-# Full pipeline — GitHub + LabArchives:
-python run.py "<github_url>" "<la_page_name_1>" "<la_page_name_2>"
-
-# LabArchives-only — GitHub URL will be auto-discovered from page content if present:
-python run.py "<la_page_name_1>" "<la_page_name_2>"
-```
-
-- LabArchives inputs can be page titles (case-insensitive), raw base64 tree_ids, or notebook URLs.
-- If no GitHub URL is given and a GitHub link is found inside a LabArchives page, it is fetched automatically.
-- Output lands in `outputs/<experiment_id>/` with:
-  - `notebooks.md` — all notebook content
-  - `labarchives.md` — lab notes from LabArchives
-  - `data_summaries.md` — CSV contents and numeric ranges
-  - `dependencies.md` — source code of lab-specific imports found in the org
-  - `github_images/` + `github_images.md` — images downloaded from the GitHub repo
-  - `labarchives_images/` + `labarchives_images.md` — images from LabArchives (attachments + embedded)
-  - `dr_conditions.md` — dilution refrigerator temperatures and pressures (written only if the user requests it — see Step 2b)
-
-**If run.py exits with `COOKIE_REFRESH_NEEDED`:** immediately run `python get_la_cookies.py` (never ask the user), then rerun the exact same `run.py` command. Do not proceed without images — the report requires them. (run.py probes cookie validity before fetching anything, so this normally fails within seconds, and the rerun is cheap: page lookups and GitHub files are served from local caches.)
-
-## Step 2b — resolve the DR answer (checked after Phase A, never before)
-
-The DR question was already asked in Step 0. Do **not** block Steps 2–3 on the answer — go straight from `run.py` to Phase A (Step 3). Check for the answer only when Phase A finishes, right before Phase B:
-
-- **Slack session:** fetch the thread with `conversations.replies` (channel + thread_ts from the `Reply-to` line) and look for the user's reply after the DR question.
-- **Interactive session:** the answer is already in the conversation.
-
-Then:
-- User said **yes** with a date/window → fetch DR data (below), spawn `dr-analyst` (Step 3, Phase A), wait for it, then proceed to Phase B
-- User said **no** → proceed directly to Phase B, skip DR entirely — do not mention DR conditions anywhere in the report
-- **No answer yet** (Slack only) → write this reminder as your final text output and exit (the system delivers it): *"The report analysis is ready — I just need your answer on dilution refrigerator conditions to finish. Reply with a date/time window to include them, or 'no' to skip."* The next session picks up from here: outputs and `extracted_*.md` files already exist, so it must NOT re-run `run.py` or Phase A — it resolves the DR answer and continues from Phase B.
-
-If the user says **yes** and provides a date/window:
-
-**If the user gives only a date** (e.g. "Feb 18 2025"), use `window_hours` — it extends ±N hours around the full calendar day:
-```python
-cd $PROJECT_ROOT
-python -c "
-from datetime import datetime
-from lab_agent.dr import get_dr_conditions
-md = get_dr_conditions('DR_DATA_PATH_FROM_ENV', datetime(YYYY, MM, DD), window_hours=12)
-print(md if md else 'NO_DATA')
-"
-```
-
-**If the user gives an explicit time range** (e.g. "Feb 18 2025, 14:00–22:00"), use `explicit_start` and `explicit_end` so the window is exact:
-```python
-cd $PROJECT_ROOT
-python -c "
-from datetime import datetime
-from lab_agent.dr import get_dr_conditions
-md = get_dr_conditions(
-    'DR_DATA_PATH_FROM_ENV',
-    datetime(YYYY, MM, DD),
-    explicit_start=datetime(YYYY, MM, DD, HH, MM_start),
-    explicit_end=datetime(YYYY, MM, DD, HH, MM_end),
-)
-print(md if md else 'NO_DATA')
-"
-```
-
-Replace `DR_DATA_PATH_FROM_ENV` with the value of `DR_DATA_PATH` from `.env`. Save the output to `outputs/<experiment_id>/dr_conditions.md`.
-
-## Step 3 — multi-agent report generation
-
-**Immediately after `run.py` finishes** — do not wait for the DR answer — generate the report by spawning the project subagents defined in `.claude/agents/`. Do **not** write the report yourself.
-
-Phase order: **Phase A** (analysts, concurrent; starts right after run.py) → **resolve DR answer (Step 2b)**, spawning `dr-analyst` if needed → **Phase B** (waits for all extractions) → **Phase C** (waits for B) → **Phase D** (waits for C; may trigger one Phase C revision).
-
-**Conventions for every subagent:**
-- Let `<out_dir>` = `$PROJECT_ROOT/outputs/<experiment_id>`. Pass it literally in each spawn prompt — the agent definitions expect it.
-- Each agent reads its inputs from `<out_dir>` and writes its output file(s) back into `<out_dir>`; the agent definitions carry the full role instructions and output schemas.
-- Spawn agents with the Agent tool using the agent name as the subagent type. **Spawn the Phase A agents together in a single message so they run concurrently.** Wait for a phase to fully complete before starting the next.
-
-> **This branch is agents-only.** A direct-API implementation of these same four phases (using `ANTHROPIC_API_KEY` instead of Claude Code subagents) exists separately on the `conference-api-version` branch as `run_phase_a/b/c/d.py`, for environments without a Claude Code plan. It is intentionally not part of this branch — always orchestrate the phases via the Agent tool as described below.
-
-### Phase A — parallel extraction (concurrent subagents)
-
-Spawn the three main analysts in **one message, immediately after run.py** (do not wait for the DR answer), each with the prompt `<out_dir> = <the actual path>`:
-
-- **`github-analyst`** → writes `<out_dir>/extracted_github.md`
-- **`labarchives-analyst`** → writes `<out_dir>/extracted_labarchives.md` (also fetches the wiring diagram page live)
-- **`deps-analyst`** → writes `<out_dir>/extracted_deps.md`
-
-When they finish, resolve the DR answer (Step 2b). If the answer is yes, fetch the DR data and spawn the late Phase A member:
-
-- **`dr-analyst`** → writes `<out_dir>/extracted_dr.md` — **spawn only once `<out_dir>/dr_conditions.md` exists**
-
-### Phase B — synthesis (1 subagent)
-
-After all Phase A agents finish **and the DR answer is resolved** (yes + dr-analyst done, or no), spawn **`synthesis`** with the same `<out_dir>` prompt → writes `<out_dir>/connections.md`.
-
-### Phase C — report writing (1 subagent)
-
-After Phase B finishes, spawn **`report-writer`** with the `<out_dir>` prompt → writes `<out_dir>/[UNSIGNED] <experiment_id>.md`. It follows `docs/report_style_guide.md`.
-
-### Phase D — critique and revision
-
-After Phase C finishes, spawn **`critic`** with the `<out_dir>` prompt → writes `<out_dir>/critique.md`.
-
-Read `critique.md`:
-- **All items PASS** → proceed directly to Step 4 (upload).
-- **Any item FAILs** → run one revision pass: spawn **`report-writer`** again with the prompt `<out_dir> = <path>. Revision mode — fix only the FAIL items in critique.md.` Then proceed to Step 4.
-
-## Step 4 — upload the report to LabArchives
-
-After the report passes critique, run:
-
-```bash
-cd $PROJECT_ROOT
-python upload_to_labarchives.py outputs/<experiment_id>
-```
-
-This will:
-1. Find the **$UPLOAD_FOLDER** folder in the $PRIMARY_NOTEBOOK notebook.
-2. Create a new page named after the experiment (the output folder name).
-3. Post the report as a rendered HTML rich-text entry.
-4. Attach the raw `.md` file.
-
-If the upload fails, report the error to the user — do not silently skip it.
+| Need | Command |
+|---|---|
+| Check credentials are present | `python -c "from lab_agent.config import check_env; check_env()"` |
+| Check credentials actually **work** | `python -c "from lab_agent.config import check_env; check_env(live=True)"` |
+| Fetch an experiment | `python run.py "<github_url>" "<la_page>"…` — `--experiment-id NAME` when the code lives in another run's folder, `--reuse`/`--force` to override the collision guard |
+| Upload a report | `python upload_to_labarchives.py outputs/<id>` — `--report-file`, `--page-title`, `--new-page`. **Exits 5 unless `critique.md` says `passed`** — fix the critique's FAIL items via a report-writer revision pass, don't reach for `--force` |
+| Structural gate / drift | `python -m lab_agent.cli.eval check\|diff outputs/<id>` |
+| Report timings | `python -m lab_agent.cli.timings outputs/<id>` |
+| Record into the knowledge bundle | `python -m lab_agent.cli.record_knowledge outputs/<id> [--sign]` |
+| Verify links in a run | `python -m lab_agent.cli.verify_links outputs/<id>` |
+| Ask the knowledge graph | `python -m lab_agent.cli.query_kb "<question>"` |
+| Keyword/identifier search (free) | `python -m lab_agent.cli.ask "<question>"` |
+| Read one crawled page verbatim | `knowledge/labarchives/<safe_page_name>.md` — just Read the file |
+| Rebuild/refresh the KG | `python -m lab_agent.cli.build_kb [--index] [--full]` |
+| **List a run's figures (free, instant)** | `ls outputs/<id>/github_images/ outputs/<id>/labarchives_images/` — **check here before fetching anything**; a reported run already holds its figures locally |
+| Fetch a page's figures (cookie-gated) | `python -m lab_agent.cli.fetch_page_images "<page>"` — only when the figure is in no run directory |
+| Zoom/crop a figure | `python -m lab_agent.cli.view_figure "<path>" [--crop X0 Y0 X1 Y1] [--scale 2]` |
+| Resolution regression check | `python -m lab_agent.cli.eval_qa` |
+| **Run the test suite** | `python tests/run_all.py [name-filter]` — one process per file, outbound network **denied** (loopback allowed). Never `for t in tests/test_*.py`: a probe that wrote to the real LabArchives notebook rode along in that glob 27 times, exiting 0 each time |
+| Check a draft's numbers against a report | `python -m lab_agent.cli.verify_claims --draft <file> --source outputs/<id>` — presence only; wrong-label pairing still needs reading |
+| Refresh LabArchives cookies | `python get_la_cookies.py` |
+| Slack (post/post-summary/upload/read-thread/channels/search/fetch-files) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above. **A report's summary goes out via `post-summary --run outputs/<id>`, never `post`** — it reads the gated `slack_summary.md` and takes no message text |
+| DR conditions | `python run_dr.py "YYYY-MM-DD" [--hours N]` |
+| Disk footprint / retention | `python -m lab_agent.cli.cleanup` (dry run) then `--caches` / `--images` / `--logs` / `--all`. Policy in `lab_agent/retention.py`: the record (reports, extractions, critiques, provenance, metadata, corpus) is never auto-deleted; figures are reclaimed only once the report is uploaded AND the run has been idle for a week. Reading a figure marks it in use, so anything under discussion stays on disk |
 
 ## Known limitation
-Web app page IDs (e.g. `11400322`) do **not** map to API tree_ids.
-Pass page titles or base64 tree_ids instead.
-
----
-
-## DR Quick Status (no report)
-
-Use this when the user asks about **current** DR conditions — no date given, or phrased as "right now", "currently", "how's the DR", "what's the MXC temp", etc.
-
-Do **not** write a report or upload anything. Just run the parser and reply in Slack with a short plain-text status.
-
-### Steps
-
-1. Run the parser with today's date and a 2-hour window:
-   ```bash
-   cd $PROJECT_ROOT
-   python run_dr.py "YYYY-MM-DD" --hours 2
-   ```
-   (Replace YYYY-MM-DD with today's date.)
-
-2. Read the output `dr_conditions.md`.
-
-3. Reply to Slack with a brief status — 3–5 lines covering:
-   - MXC temperature (min and current/latest reading)
-   - Whether the system is at base, cooling, or warming
-   - P1 pressure (pumps running or not)
-   - Any anomaly worth flagging (thermal event, elevated temp, etc.)
-
-No file is saved. No LabArchives upload. This is a read-only status check.
-
----
-
-## DR-Only Report Workflow
-
-Use this workflow when the user asks for a dilution refrigerator conditions report without any experiment (no GitHub URL). Examples:
-- "Give me a DR report for Feb 18 2025"
-- "What were the DR conditions on Feb 18 between 2pm and 10pm?"
-- "Log the cooldown from Feb 17–19 2025"
-
-### Step A — run the DR parser
-
-```bash
-cd $PROJECT_ROOT
-python run_dr.py "YYYY-MM-DD"                        # ±12 h window (default)
-python run_dr.py "YYYY-MM-DD" --hours 24             # wider window
-python run_dr.py "YYYY-MM-DD HH:MM" "YYYY-MM-DD HH:MM"  # explicit start/end
-```
-
-This saves `dr_conditions.md` to `outputs/dr_YYYYMMDD/` and prints the output folder path.
-
-### Step B — multi-agent report generation (DR-only)
-
-Use a 3-agent pipeline — spawn agents sequentially (each waits for the previous), with `<out_dir>` = `$PROJECT_ROOT/outputs/dr_YYYYMMDD`:
-
-1. **`dr-analyst`** — prompt: `<out_dir> = <path>`. Writes `extracted_dr.md` (reads `docs/dr_physics_reference.md` itself).
-2. **`report-writer`** — prompt: `<out_dir> = <path>. This is a DR-only report (dr_YYYYMMDD).` Writes `[UNSIGNED] dr_YYYYMMDD.md` using the "DR-only report sections" structure in `docs/report_style_guide.md`.
-3. **`critic`** — prompt: `<out_dir> = <path>. This is a DR-only report.` Uses its DR-only checklist. If any item fails, one revision pass with `report-writer` in revision mode.
-
-### Step C — upload to LabArchives
-
-```bash
-cd $PROJECT_ROOT
-python upload_to_labarchives.py outputs/dr_YYYYMMDD
-```
+Web app page IDs (e.g. `11400322`) do **not** map to API tree_ids. Pass page titles or base64 tree_ids instead. There is therefore **no per-page deep link** — when telling someone where a report is, give the notebook URL printed by the upload command plus "$UPLOAD_FOLDER / \<page title\>". Never invent, shorten, or elide a URL: a fabricated GitHub link in a draft channel message 404'd for the whole lab.

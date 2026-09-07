@@ -29,6 +29,10 @@ dependencies = [
 [project.optional-dependencies]
 # Read session cookies from an installed browser instead of get_la_cookies.py
 browser-cookies = ["browser-cookie3"]
+# Stage 5 knowledge-graph retrieval (LightRAG + local embeddings). Optional — the
+# pipeline and the keyword-search fallback work without it. The build LLM is the
+# Claude Code plan via headless `claude -p` (no API SDK needed).
+rag = ["lightrag-hku", "sentence-transformers"]
 
 [tool.setuptools.packages.find]
 include = ["lab_agent*"]

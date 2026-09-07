@@ -30,11 +30,13 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from ..config import PROJECT_ROOT
 from . import api
 from .sessions import (
+    KG_REFRESH_HOUR,
     MAX_CONCURRENT,
     MAX_PER_USER,
     SESSION_TIMEOUT,
     is_ack,
     is_pipeline_request,
+    kg_refresh_loop,
     reaper_loop,
     spawn_claude,
 )
@@ -47,7 +49,7 @@ app = App(token=api.bot_token())
 @app.event("app_mention")
 def handle_mention(event, say, logger):
     user        = event["user"]
-    text        = event["text"]
+    text        = api.unwrap_slack_text(event["text"])
     channel     = event["channel"]
     current_ts  = event["ts"]
     thread_ts   = event.get("thread_ts")   # None if this is the thread parent
@@ -66,13 +68,15 @@ def handle_mention(event, say, logger):
 
 @app.event("message")
 def handle_dm(event, say, logger):
-    if event.get("bot_id") or event.get("subtype"):
-        return
     if event.get("channel_type") != "im":
+        return
+    # Ignores bot echoes and edits/joins, but lets a file upload through — see
+    # api.dm_event_text.
+    text = api.dm_event_text(event)
+    if text is None:
         return
 
     user       = event["user"]
-    text       = event["text"]
     channel    = event["channel"]
     current_ts = event["ts"]
     thread_ts  = event.get("thread_ts")
@@ -99,6 +103,14 @@ def main() -> None:
     print(f"[slack-listener] Session timeout: {SESSION_TIMEOUT // 60} min  "
           f"Max concurrent: {MAX_CONCURRENT}  Per-user cap: {MAX_PER_USER}", flush=True)
     threading.Thread(target=reaper_loop, daemon=True).start()
+    threading.Thread(target=kg_refresh_loop, daemon=True).start()
+    print(f"[slack-listener] Nightly KG refresh scheduled for {KG_REFRESH_HOUR:02d}:00 "
+          "(local); Task Scheduler job kept as fallback, build lock prevents overlap.", flush=True)
+    # Host the warm knowledge-graph query service so Slack Q&A skips the ~25-40s cold start
+    # per question. It loads the graph once in its own thread; query_kb falls back to a cold
+    # load if it isn't up. No-op if the RAG deps / built graph are absent.
+    from ..rag.service import serve_in_background
+    serve_in_background()
     print("[slack-listener] Waiting for Slack messages...")
     SocketModeHandler(app, api.app_token()).start()
 
