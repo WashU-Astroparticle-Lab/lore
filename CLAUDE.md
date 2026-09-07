@@ -158,6 +158,7 @@ All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from 
 | Fetch a page's figures (cookie-gated) | `python -m lab_agent.cli.fetch_page_images "<page>"` — only when the figure is in no run directory |
 | Zoom/crop a figure | `python -m lab_agent.cli.view_figure "<path>" [--crop X0 Y0 X1 Y1] [--scale 2]` |
 | Resolution regression check | `python -m lab_agent.cli.eval_qa` |
+| **Run the test suite** | `python tests/run_all.py [name-filter]` — one process per file, outbound network **denied** (loopback allowed). Never `for t in tests/test_*.py`: a probe that wrote to the real LabArchives notebook rode along in that glob 27 times, exiting 0 each time |
 | Check a draft's numbers against a report | `python -m lab_agent.cli.verify_claims --draft <file> --source outputs/<id>` — presence only; wrong-label pairing still needs reading |
 | Refresh LabArchives cookies | `python get_la_cookies.py` |
 | Slack (post/post-summary/upload/read-thread/channels/search/fetch-files) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above. **A report's summary goes out via `post-summary --run outputs/<id>`, never `post`** — it reads the gated `slack_summary.md` and takes no message text |
