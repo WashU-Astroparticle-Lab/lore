@@ -2,6 +2,8 @@
 Slack from the pipeline — the ONE supported way for an agent to talk to Slack.
 
     python -m lab_agent.cli.slack post        --channel C123 [--thread TS] --text-file msg.txt
+    python -m lab_agent.cli.slack post-summary --channel C123 [--thread TS] --run outputs/<id>
+                                              [--tag U123] [--timing "~17 min total"]
     python -m lab_agent.cli.slack upload      --channel C123 [--thread TS] --file a.png [--file b.png]
                                               [--comment-file note.txt] [--title "..."]
     python -m lab_agent.cli.slack read-thread --channel C123 --thread TS [--limit 50]
@@ -18,15 +20,19 @@ call looked exactly like a delivered one. Message text is therefore only ever
 read from a FILE, never from a shell argument, and every command verifies by
 reading back what it did before reporting success.
 
-Exit codes: 0 delivered and verified, 1 usage error, 2 the Slack call failed.
+Exit codes: 0 delivered and verified, 1 usage error, 2 the Slack call failed,
+5 post-summary refused (critique not `passed`, or the summary cites a
+LabArchives location for a report that was never uploaded).
 """
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 from pathlib import Path
 
-from ..config import load_env
+from ..config import PROJECT_ROOT, load_env
+from ..critique import blocks_upload, explain, read_verdict
 from ..slack import api
 
 
@@ -89,6 +95,89 @@ def cmd_post(opts: dict) -> None:
     else:
         # Delivered per the API but not readable back — say so rather than
         # letting the agent tell the user it landed.
+        print(f"[slack] WARNING: posted (ts={ts}) but could not read it back — verify manually")
+        sys.exit(2)
+
+
+def cmd_post_summary(opts: dict) -> None:
+    """Announce a report by pointing at its run directory — never by prose.
+
+    A report's Slack summary is gated: report-writer writes slack_summary.md and
+    the critic checks its numbers and hedging against the report (item 10).
+    Composing one freehand puts ungated prose in front of the lab, and it keeps
+    happening. A report saying "+0.165 dB at 6.9 GHz, -0.139 dB at 6.44 GHz"
+    became those numbers swapped; a report whose "confirming" the critic had just
+    removed was announced as "confirmed"; and on 2026-09-06 a revision request
+    produced a freehand three-bullet summary, ending in a LabArchives location,
+    for a report that had not been rewritten, re-critiqued or re-uploaded.
+
+    So the announcement takes a --run, not a --text-file. There is no argument
+    that lets you put your own words in it.
+    """
+    channel = opts.get("channel") or _die("post-summary needs --channel")
+    run = opts.get("run") or _die(
+        "post-summary needs --run outputs/<id> (the summary is read from that run, "
+        "never composed)")
+    out_dir = Path(run)
+    if not out_dir.is_absolute():
+        out_dir = PROJECT_ROOT / out_dir
+    if not out_dir.is_dir():
+        _die(f"--run is not a directory: {out_dir}")
+
+    summary_path = out_dir / "slack_summary.md"
+    if not summary_path.is_file():
+        _die(f"no slack_summary.md in {out_dir.name} — re-spawn report-writer rather "
+             "than writing one yourself", 2)
+    text = _read_text(str(summary_path), "slack_summary.md")
+
+    # Same gate as the upload: announcing a failed report to the lab is as
+    # consequential as filing it.
+    verdict = read_verdict(out_dir)
+    if blocks_upload(verdict):
+        reason = explain(verdict).replace("[upload]", "[slack]", 1)
+        reason = chr(10).join(
+            line for line in reason.splitlines() if "--force" not in line)
+        print(reason)
+        print("[slack] REFUSED to announce this report to the lab. There is no --force "
+              "here: fix the critique, then announce it.")
+        sys.exit(5)
+
+    # A summary that names a location must have a location. This is the exact
+    # shape of the 23:38 message: a LabArchives line for a report nothing had
+    # been done to.
+    if "labarchives:" in text.lower():
+        meta = out_dir / "metadata.json"
+        record = None
+        if meta.is_file():
+            try:
+                record = json.loads(meta.read_text(encoding="utf-8")).get("labarchives_upload")
+            except (OSError, ValueError):
+                record = None
+        if not record:
+            _die(f"slack_summary.md cites a LabArchives location but {out_dir.name} has no "
+                 "labarchives_upload record — upload it first, or the message tells the lab "
+                 "a page changed when it did not", 5)
+        if "<filled in on upload>" in text:
+            _die("slack_summary.md still holds the upload placeholder — run "
+                 "upload_to_labarchives.py, which fills it in", 5)
+
+    parts = []
+    if opts.get("tag"):
+        parts.append(f"<@{opts['tag'].lstrip('@')}>")
+    parts.append(text)
+    body = " ".join(parts) if len(parts) > 1 else text
+    if opts.get("timing"):
+        body = body + chr(10) * 2 + f"_Pipeline: {opts['timing']}_"
+
+    try:
+        ts = api.post_message_checked(channel, opts.get("thread"), body)
+    except api.SlackError as exc:
+        _die(f"post-summary failed: {exc}", 2)
+
+    if api.message_exists(channel, ts):
+        print(f"[slack] summary posted verbatim from {summary_path.name} and verified: "
+              f"channel={channel} ts={ts} ({len(body)} chars)")
+    else:
         print(f"[slack] WARNING: posted (ts={ts}) but could not read it back — verify manually")
         sys.exit(2)
 
@@ -227,6 +316,7 @@ def cmd_fetch_files(opts: dict) -> None:
 
 COMMANDS = {
     "post": cmd_post,
+    "post-summary": cmd_post_summary,
     "upload": cmd_upload,
     "read-thread": cmd_read_thread,
     "channels": cmd_channels,
@@ -236,6 +326,11 @@ COMMANDS = {
 
 
 def main() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError):
+            pass
     load_env()
     cmd, opts = _parse(sys.argv[1:])
     handler = COMMANDS.get(cmd)

@@ -227,7 +227,19 @@ Distils a per-experiment concept into `knowledge/experiments/<id>.md`. When a hu
 
 ## Step 5 — post the Slack summary (do NOT write your own)
 
-`report-writer` produced `<out_dir>/slack_summary.md`, and the critic checked its numbers and hedging against the report. **Post that file's contents as your final message, verbatim**, adding only the `<@user>` tag and the one-line timing summary.
+`report-writer` produced `<out_dir>/slack_summary.md`, and the critic checked its numbers and
+hedging against the report. **Post it with the command — there is no supported way to type your
+own summary:**
+
+```bash
+cd $PROJECT_ROOT
+python -m lab_agent.cli.slack post-summary --channel <C…> --thread <ts>     --run outputs/<experiment_id> --tag <user_id> --timing "~17 min total"
+```
+
+It reads `slack_summary.md` verbatim, adds only the tag and the timing line, and **refuses**
+(exit 5) if the critique is not `passed` or if the summary cites a LabArchives location for a
+run with no upload record. Announcing a report to the lab is as consequential as filing it, so
+it is behind the same gate.
 
 Do not compose a fresh summary from what the subagents told you. Every factual defect that has reached the lab came from that habit — a report saying "+0.165 dB at 6.9 GHz, −0.139 dB at 6.44 GHz" became "−0.139 dB at 6.9 GHz and +0.165 dB at 6.44 GHz" in the Slack message, and a report whose "confirming" the critic had just removed was announced as "confirmed". The report is gated; freehand prose about it is not.
 
@@ -240,6 +252,15 @@ When the user asks for a change to a report that is already written or uploaded 
 1. Spawn **`report-writer`** with: `<out_dir> = <path>. User revision — <the user's request, verbatim>.` It rebuilds from the extracted files, not from the old draft.
 2. Re-spawn **`critic`**, and handle its verdict exactly as in Phase D.
 3. Re-run the structural gate, then re-upload with `python upload_to_labarchives.py outputs/<experiment_id>` — which now revises the existing page instead of creating a duplicate.
+4. Announce it with `python -m lab_agent.cli.slack post-summary --run outputs/<experiment_id>`.
+
+**"Make it shorter" means the report, not your message.** A revision request is always about
+the document; shortening your own Slack reply changes nothing the user asked about. Asked to
+"make it shorter and drop the figure list", one session replied 25 seconds later with a
+freehand three-bullet summary, ending in a LabArchives location — while the report on disk was
+untouched, the critic had not re-run, and nothing had been uploaded. It looked like a completed
+revision and was not one. All four steps above run, every time, and the reply comes from
+`post-summary`.
 
 If the user wants a **separate** document rather than a replacement (e.g. "make a simpler version *as well*"), pass the target filename to `report-writer` and upload it with `--report-file` and its own `--page-title`.
 

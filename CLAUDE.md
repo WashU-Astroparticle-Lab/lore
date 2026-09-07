@@ -79,7 +79,8 @@ You can call the Slack API directly using the bot token. Available scopes includ
 
 ```bash
 cd $PROJECT_ROOT
-python -m lab_agent.cli.slack post        --channel <C…> [--thread <ts>] --text-file <path>
+python -m lab_agent.cli.slack post         --channel <C…> [--thread <ts>] --text-file <path>
+python -m lab_agent.cli.slack post-summary --channel <C…> [--thread <ts>] --run outputs/<id> [--tag <U…>] [--timing <str>]
 python -m lab_agent.cli.slack upload      --channel <C…> [--thread <ts>] --file <path> [--file <path>] [--comment-file <path>]
 python -m lab_agent.cli.slack read-thread --channel <C…> --thread <ts> [--limit 50]
 python -m lab_agent.cli.slack channels    [--filter <substring>]
@@ -159,7 +160,7 @@ All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from 
 | Resolution regression check | `python -m lab_agent.cli.eval_qa` |
 | Check a draft's numbers against a report | `python -m lab_agent.cli.verify_claims --draft <file> --source outputs/<id>` — presence only; wrong-label pairing still needs reading |
 | Refresh LabArchives cookies | `python get_la_cookies.py` |
-| Slack (post/upload/read-thread/channels/search/fetch-files) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above |
+| Slack (post/post-summary/upload/read-thread/channels/search/fetch-files) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above. **A report's summary goes out via `post-summary --run outputs/<id>`, never `post`** — it reads the gated `slack_summary.md` and takes no message text |
 | DR conditions | `python run_dr.py "YYYY-MM-DD" [--hours N]` |
 | Disk footprint / retention | `python -m lab_agent.cli.cleanup` (dry run) then `--caches` / `--images` / `--logs` / `--all`. Policy in `lab_agent/retention.py`: the record (reports, extractions, critiques, provenance, metadata, corpus) is never auto-deleted; figures are reclaimed only once the report is uploaded AND the run has been idle for a week. Reading a figure marks it in use, so anything under discussion stays on disk |
 
