@@ -73,7 +73,8 @@ python -m lab_agent.cli.slack read-thread --channel <channel> --thread <thread_t
 Handle every message since you started, not just the DR line:
 
 - **Q1 objective** → this is the experiment's stated goal; pass it verbatim to `synthesis` and `report-writer`.
-- **Q3 full/brief** → pass to `report-writer`.
+- **"full" or "detailed" anywhere in the thread** → pass it to `report-writer`. There is no
+  longer a full/brief intake question — brief is the default and silence means brief.
 - **Any other instruction** ("only use these figures", "drop that section", "the cause was actually X") → apply it, and **acknowledge it in your next Slack post** so the user can see it landed. If you cannot apply it, say why. Never let one pass unmentioned.
 - **Interactive session:** the answers are already in the conversation.
 
