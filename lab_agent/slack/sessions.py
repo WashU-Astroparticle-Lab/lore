@@ -330,7 +330,6 @@ def spawn_claude(
         history_label = "Conversation history — full thread, oldest first"
 
     reply_to_str = f"channel={channel}, thread_ts={reply_ts}"
-    post_data_py: dict = {"channel": channel, "thread_ts": reply_ts, "text": "<message>"}
 
     # Resume the thread's existing Claude session when its transcript survives;
     # a resumed session already holds the full conversation and pipeline state,
@@ -349,19 +348,15 @@ def spawn_claude(
             Continue from wherever you left off. Never repeat completed steps — if run.py
             outputs or extracted_*.md files already exist, do not regenerate them.
 
+            A request to change a report already written ("make it shorter", "drop the key
+            parameters") is a revision of the REPORT — report-writer, critic, upload, summary,
+            per experiment-report's revision section. Not an edit of your own reply.
+
             Delivery rules (unchanged): your final text output is delivered to Slack
-            automatically after you exit — do NOT post the final reply yourself. Post
-            mid-pipeline progress updates via Python chat.postMessage as before:
-              python -c "
-import json, urllib.request
-from dotenv import dotenv_values
-token = dotenv_values('{PROJECT_ROOT}/.env')['SLACK_BOT_TOKEN']
-data = json.dumps({post_data_py}).encode()
-req = urllib.request.Request('https://slack.com/api/chat.postMessage', data=data, method='POST')
-req.add_header('Authorization', f'Bearer {{token}}')
-req.add_header('Content-Type', 'application/json')
-urllib.request.urlopen(req, timeout=10)
-"
+            automatically after you exit — do NOT post the final reply yourself. A report's
+            final output is <out_dir>/slack_summary.md verbatim, never prose you compose.
+            Post mid-pipeline progress updates with the CLI:
+              python -m lab_agent.cli.slack post --channel {channel} --thread {reply_ts} --text-file <path>
         """).strip()
         return _launch(user, channel, reply_ts, current_ts, prompt, resume_id=resume_id,
                        thread_key=thread_key, orig_thread_ts=thread_ts, user_text=text,
@@ -380,172 +375,47 @@ urllib.request.urlopen(req, timeout=10)
         Session ID    : {session_id}
         Latest message: {text}
         Reply-to      : {reply_to_str}
+        Project root  : {PROJECT_ROOT}
 
         {history_label} (empty means this is a new conversation):
         {history_str}
 
-        IMPORTANT — how responses are delivered:
-        Your final response is delivered to Slack automatically by the system after you exit.
-        Just write your response as normal text output. Do NOT try to post your final reply
-        to Slack yourself.
+        FIRST ACTION, before you answer anything: read CLAUDE.md in the project root, classify
+        the request per its routing table, and invoke the matching skill with the Skill tool.
+        CLAUDE.md and .claude/skills/ are the only pipeline instructions — this prompt does not
+        restate them, and deliberately so. It used to, and the copy went stale: it was still
+        telling sessions to ask "Full report or brief?" after that question was removed for
+        causing full-template reports, and still telling them to "go straight to writing a fresh
+        report from the existing files" when the skill forbids writing a report outside
+        report-writer. A session answered a revision request with zero tool calls, twice,
+        because this prompt's routing had no case for it and its own text was easier to reach
+        than the file.
 
-        For MID-PIPELINE progress updates only (e.g. "Fetching data...", "Writing report..."),
-        post using Python — do NOT use curl (it is unreliable on Windows):
-          python -c "
-import json, urllib.request
-from dotenv import dotenv_values
-token = dotenv_values('{PROJECT_ROOT}/.env')['SLACK_BOT_TOKEN']
-data = json.dumps({post_data_py}).encode()
-req = urllib.request.Request('https://slack.com/api/chat.postMessage', data=data, method='POST')
-req.add_header('Authorization', f'Bearer {{token}}')
-req.add_header('Content-Type', 'application/json')
-urllib.request.urlopen(req, timeout=10)
-"
+        Answering from this prompt alone is the failure mode. If the request touches an
+        experiment, a report, a figure or the lab's past work, you cannot answer it correctly
+        without the skill — the history above is a record of the conversation, not a source of
+        facts about the data.
 
-        Searching Slack for experiment context (only when the user's request is vague and you need
-        to find a GitHub URL, LabArchives page name, or experiment name — not for general browsing):
-          python -c "
-import json, urllib.request, urllib.parse
-from dotenv import dotenv_values
-token = dotenv_values('{PROJECT_ROOT}/.env')['SLACK_BOT_TOKEN']
-qs = urllib.parse.urlencode({{'query': '<term>', 'count': '5'}})
-req = urllib.request.Request(f'https://slack.com/api/search.messages?{{qs}}')
-req.add_header('Authorization', f'Bearer {{token}}')
-with urllib.request.urlopen(req, timeout=10) as r: print(r.read().decode())
-"
+        A request to CHANGE a report already written ("make it shorter", "drop the key
+        parameters", "the goal was really X") is a revision **of the report**, not an edit of
+        your own reply. It runs the full path in experiment-report's revision section:
+        report-writer, then the critic, then the upload, then the summary. Shortening your Slack
+        message changes nothing the user asked about.
 
-        What to do:
-        - Read CLAUDE.md in the project root for the full pipeline instructions.
-        - The conversation history above is the live record of this Slack chat, fetched directly
-          from Slack right now. "(new conversation)" means the user started a fresh chat — clean slate.
-        - You also have persistent memory files on disk (in memory/ next to CLAUDE.md) that carry
-          background knowledge across sessions: project state, pipeline facts, rules, etc.
-        - When the user asks "what do you remember?" or similar, answer only from the conversation
-          history above. Do not surface or mention persistent memory files — those are background
-          context for you, not something to recite to the user.
-        - Don't repeat questions that are already answered in the history.
-        - If info is still missing, ask naturally for just the missing piece.
-        - For questions or chat, answer warmly and helpfully. Keep replies short and conversational.
+        How your reply is delivered:
+        Your final text output is posted to Slack automatically after you exit. Do NOT post the
+        final reply yourself — that double-posts. For a report, your final output is the verbatim
+        contents of <out_dir>/slack_summary.md, plus only <@{user}> and a one-line timing
+        summary. Read that file; never compose a summary from what the subagents told you.
+        (`slack post-summary` is for sending a summary to a CHANNEL, where nothing auto-posts.)
 
-        ROUTING — decide this BEFORE doing anything else. Classify the latest message:
-          (A) REPORT REQUEST — it contains a GitHub URL, OR explicitly asks to write/generate/make
-              a report for a specific experiment, OR asks for a DR conditions report.
-              -> run the pipeline (see the steps below).
-          (B) QUESTION / KNOWLEDGE QUERY — a broad or specific question about the lab's past work:
-              "what do we know about...", "have we ever...", "which experiments/runs...", an
-              overview/topic question, or any request to find or summarise past findings.
-              -> ANSWER FROM THE KNOWLEDGE GRAPH. Run:
-                   python -m lab_agent.cli.query_kb "<the user's question>"
-                 and reply from its output, citing the experiment/page ids it returns. This is
-                 LOCAL and needs NO LabArchives cookies and NO fetching. For a type-(B) question you
-                 MUST NOT run run.py, MUST NOT open/fetch LabArchives pages, and MUST NEVER run
-                 get_la_cookies.py.
-                 RESOLVE IDENTIFIERS FIRST: query_kb prints a "Candidate pages (keyword/ID match)"
-                 list below its answer. The graph is weak at raw IDs (chip/run IDs, filenames in
-                 hyperlinks, e.g. BE260416); if the graph "doesn't have" an ID from the question but
-                 a candidate page clearly matches it, USE that page (for a figure/number question,
-                 run fetch_page_images on the top candidate and continue) instead of asking the user
-                 to name it. Only if candidates are genuinely ambiguous, list them and ASK WHICH ONE.
-                 If NOTHING matches, say so plainly and OFFER a full report — never fabricate,
-                 silently fetch, or trigger a cookie refresh.
-              EXCEPTION — a question about a specific PLOT/FIGURE: after query_kb finds the page,
-                 use the figure step in CLAUDE.md (`fetch_page_images` then Read the images), which
-                 is CHEAP-BY-DEFAULT, PRECISE-WHEN-NEEDED: handle qualitative "which/what does this
-                 show" reads yourself; for PRECISE/QUANTITATIVE reads (exact values, a mean, reading
-                 many points off a plot), or many figures to sift, or low-confidence, or user
-                 pushback, delegate the WHOLE figure job to one Opus image-analyst subagent (Agent
-                 tool, model: "opus", fresh context) that surveys the figures, ZOOMS the answer
-                 figure with `python -m lab_agent.cli.view_figure "<path>" --crop X0 Y0 X1 Y1 --scale
-                 2`, then reports per-item values + the computed result + which figure + confidence.
-                 That fetch is the one Q&A case that needs the cookie, and you REFRESH IT YOURSELF
-                 (like the report pipeline): if fetch_page_images reports COOKIE_REFRESH_NEEDED, post
-                 a short Slack heads-up ("Refreshing the LabArchives session — approve the Duo push on
-                 your phone"), run `python get_la_cookies.py` yourself, then retry fetch_page_images.
-                 (This overrides the "never run get_la_cookies.py" rule, which only applies to the
-                 text-only path.) The only human step is the Duo tap; only if the refresh fails/times
-                 out do you tell the user it couldn't refresh.
-          When unsure, prefer (B): answering from lab knowledge is fast, cheap, and never blocks on cookies.
+        For mid-pipeline progress updates, use the CLI (never a hand-written python -c with a
+        token in it, and never curl):
+          python -m lab_agent.cli.slack post --channel {channel} --thread {reply_ts} --text-file <path>
+        Write the message body with the Write tool into .lore_tmp/ first.
 
-        IMPORTANT — check thread history before running the pipeline:
-        Each Slack reply spawns a fresh session. Read the conversation history carefully to
-        determine what stage the pipeline is at before doing anything:
-
-        - If history shows the bot asked about DR conditions and the latest message is the
-          user's answer (yes with a date/window, or no): the fetch and Phase A analysis are
-          already done. Do NOT re-check credentials, re-run run.py, or re-run Phase A. The
-          outputs/<experiment_id>/ files (including extracted_*.md) already exist — resolve
-          the DR answer per CLAUDE.md Step 2b and continue from Phase B.
-
-        - If history shows the report was already uploaded, and the user is asking to redo it:
-          check whether outputs/<experiment_id>/ already has the data files (labarchives.md,
-          notebooks.md, etc.). If yes, skip run.py entirely and go straight to writing a
-          fresh report from the existing files.
-
-        - Only run run.py if no output files exist yet, or if the user explicitly asks to
-          re-fetch the data.
-
-        Pipeline steps and Slack progress updates (only for a fresh pipeline run):
-
-          All Slack posting uses the CLI — never a hand-written python -c:
-             python -m lab_agent.cli.slack post --channel <ch> --thread <ts> --text-file <f>
-          Write the text with the Write tool first. Exit 0 means delivered AND verified.
-
-          1. FIRST, before anything else: post the INTAKE questions and continue
-             immediately — do NOT wait for answers. Skip any part the request already
-             answered, and skip the DR question entirely for bench / room-temperature
-             work (spectrum analyser, VNA bench comparison, wiring — anything not in
-             the fridge):
-               "Starting now — three quick things you can answer while I work:
-                1. What question was this experiment trying to answer?
-                2. Want dilution refrigerator conditions included? (date/window, or 'no')
-                3. Full report or brief?"
-             Answer 1 matters most: guessing the objective from the notebooks is what
-             causes rewrite cycles later. Answers arrive during Step 5.
-          2. Post: "Checking credentials..." then run:
-               python -c "from lab_agent.config import check_env; check_env(live=True)"
-             This validates the tokens rather than merely finding them. If GITHUB_TOKEN
-             is INVALID, say exactly that (and what to do) instead of starting a fetch
-             that will fail — a "set but 401" token once burned 75 minutes.
-          3. Post: "Fetching GitHub and LabArchives data..." then run run.py.
-             If run.py reports expired cookies, run `python get_la_cookies.py` immediately
-             (never ask the user), then post: "Session cookies refreshed, retrying fetch..."
-             and rerun run.py.
-             If run.py exits 4, it refused to overwrite another experiment's directory —
-             re-run with --experiment-id <a fresh name>. Do not use --force.
-          4. Immediately after run.py completes: post "Data fetched — analyzing..." and
-             spawn the Phase A analysts (CLAUDE.md Step 3) WITHOUT waiting for answers.
-          5. When Phase A finishes, read the thread for everything the user has said
-             since you started:
-               python -m lab_agent.cli.slack read-thread --channel <ch> --thread <ts>
-             Messages sent while you were working were NOT delivered to you — the
-             listener absorbs them — so this read is the only way you will ever see
-             them. Treat every one as an instruction you already owe an answer to:
-             - the objective (intake Q1) → pass it to Phase B/C as the experiment's goal
-             - "full"/"brief" (intake Q3) → pass it to report-writer
-             - DR yes + date/window → fetch DR data and run dr-analyst (CLAUDE.md Step 2b)
-             - DR no, or a bench experiment → continue
-             - ANY other instruction ("only use the two plots from X", "drop section Y")
-               → apply it, and acknowledge it in your next post so the user knows it
-               landed. Never silently ignore one; a dropped instruction looks identical
-               to a followed one from their side.
-             - no DR answer yet and DR is relevant → write the Step 2b reminder as your
-               final text output and exit; the next session continues from Phase B.
-          6. Post: "Writing report..." then run Phases B, C, D per CLAUDE.md.
-          7. After saving the report file:
-             Post: "Report written. Uploading to LabArchives..."
-          8. After upload completes, your final summary is the CONTENTS OF
-             <out_dir>/slack_summary.md, verbatim — the report-writer wrote it from the
-             report and the critic checked its numbers and hedging against the report.
-             Read that file and emit it as your final text output (do NOT post it
-             yourself — the system delivers your final output automatically), adding
-             only <@{user}> and a one-line timing summary.
-             Do NOT compose your own summary from memory of what the subagents
-             reported: every factual error that has reached the lab came from that
-             (a number paired with the wrong frequency; a "confirming" the critic had
-             just removed from the report). If slack_summary.md is missing, re-spawn
-             the report-writer rather than writing prose yourself.
-
-        Project root: {PROJECT_ROOT}
+        Everything else — credentials, run.py, the phase agents, the gate, the upload, Slack
+        search, cookie refresh — is in CLAUDE.md and the skill you invoke. Go read it.
     """).strip()
 
     _launch(user, channel, reply_ts, current_ts, prompt, resume_id=None,
