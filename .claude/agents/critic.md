@@ -12,10 +12,28 @@ Read the `[UNSIGNED]` report, all `extracted_*.md`, and `connections.md` in `<ou
 
 1. **Every numeric value in the report is sourced.** Check against `<out_dir>/provenance.md`, the sidecar the report-writer emits for both templates: each numeric value in the report body must have a row there, and the quoted **Source line** must actually appear in the extracted file that row names (extracted_github.md, extracted_deps.md, extracted_labarchives.md, extracted_dr.md). FAIL a value only if it appears in none of the extracted files — i.e. it is unsourced or invented. Legitimately lab-sourced values (RF attenuation, DAC_CURRENT, hand-recorded saturation amplitudes, reference-clock offsets from lab notes) are NOT failures. If `provenance.md` is absent, that alone is a FAIL — provenance is not optional just because the brief template has no visible citations. (A *full*-template report additionally carries a `Source` column; check it agrees with the sidecar.)
 2. No figure description in the report contains visual content not present in the corresponding Figures sub-section of an extracted file.
-3. "Confirms" is not used unless connections.md documents a direct quantitative comparison that supports it.
+3. **"Confirms"/"confirmed" is earned.** Two separate checks:
+   - `connections.md` documents a direct quantitative comparison that supports it; and
+   - **the same finding does not also say the thing cannot be determined.** A heading
+     reading "ADC saturation is the *confirmed* cause of the distorted cloud" two sentences
+     above "it cannot be determined … whether the amplifier itself is compressing or whether
+     the ADC is the first element to clip" is a FAIL. Both sentences shipped in one finding
+     because this item only looked for sourcing.
+   When judging the Slack summary (item 10), do **not** justify a "confirmed" by pointing at
+   a report heading that uses the same word — check the evidence, not the echo. That circular
+   reasoning is how the contradiction above passed.
 4. No step is described as executed that appears in the Goal vs. Executed map in connections.md as "no".
 5. No physics mechanism is named that does not appear in any extracted file.
-6. If the report has a Key Parameters table (full template only), it appears exactly once.
+6. **The report uses the template that was in effect.** Brief is the default
+   (`docs/report_style_guide.md`); the full template applies only when the request said
+   "full" or "detailed". So:
+   - **Brief in effect** → the report must have **no** `Table of Contents`, `Key Parameters`,
+     `Methods and Workflow` or `Citations` section, and should be ~80–120 lines. Any of those
+     four sections present, or a body well past ~120 lines, is a **FAIL** — say which sections
+     to cut. This is the whole point of the default and it was missed once: 183 lines with all
+     four sections, while this item read "Key Parameters appears exactly once" and passed it.
+   - **Full in effect** → a Key Parameters table must appear exactly once.
+   If the spawning prompt does not say which template was requested, assume **brief**.
 7. No section restates sentences that already appear in another section (in the full template this is Key Findings vs Results; in the brief template it is a **Bottom line:** repeating its own paragraph verbatim).
 8. **No dead link is cited as a source.** If `link_check.md` exists in `<out_dir>`, the report cites no URL marked `not_found` or `unreachable` there.
 9. **Citations resolve.** If the report has a `# Citations` section (full template), every `[n]` marker in the body resolves to a numbered entry and every Key Parameters row carries a citation. For a brief-template report there are no markers — instead every row of `provenance.md` must name a real extracted file, and no row may be a placeholder.

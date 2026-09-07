@@ -11,14 +11,20 @@ Run this when the user gives a GitHub URL and/or LabArchives page names for an e
 
 Post these **immediately, before any fetching**, so the user answers while the pipeline runs:
 
-> Starting now — three quick things you can answer while I work:
+> Starting now — a couple of things you can answer while I work:
 > 1. What question was this experiment trying to answer?
 > 2. Want dilution refrigerator conditions included? (date/window, or "no")
-> 3. Full report or brief?
+>
+> I'll write the brief version by default — say the word if you want the full one.
 
 - **Q1 is the important one.** The pipeline infers the objective from the notebook code, and code shows what was *run*, not what it was *for* — a calibration-looking notebook whose real purpose was comparing instrument noise produced two rewrite cycles. Whatever the user answers becomes the experiment's stated objective for Phase B and C.
 - **Skip Q2 entirely for bench / room-temperature work** (spectrum analyser, VNA comparison, cabling, wiring) — there is no fridge involved, and asking anyway has stalled a pipeline for 12 minutes waiting on an answer that could not matter.
-- **Q3** defaults to brief (see `docs/report_style_guide.md`); "full" selects the detailed template.
+- **Never ask "full or brief?"** State the default and move on. Brief is the lab's chosen
+  default (`docs/report_style_guide.md`), and a question with a default is an invitation to
+  get it wrong: asked that question and left unanswered, one run resolved the silence as
+  *full* and produced 183 lines with a Table of Contents, Key Parameters, Methods and
+  Citations — every section the brief template exists to remove. Silence means brief. Only
+  the words "full" or "detailed" in the request select the full template.
 - Skip any part the original request already answered.
 - **Slack session** (spawn prompt has a `Reply-to` line): post via `python -m lab_agent.cli.slack post`, then **continue straight to Step 1 without waiting**. Answers are collected in Step 2b.
 - **Interactive session:** ask in chat and continue when the user answers.
@@ -166,6 +172,12 @@ After Phase C, spawn **`critic`** with the `<out_dir>` prompt → `<out_dir>/cri
 Read the `## Summary` line in `critique.md`:
 - **`passed`** → proceed to the structural check.
 - **`gaps_found: <items>`** → one revision pass: spawn **`report-writer`** with `<out_dir> = <path>. Revision mode — fix only the FAIL items in critique.md.` Re-spawn the critic; if still not `passed`, escalate to the user rather than looping again.
+
+**The upload now enforces this.** `upload_to_labarchives.py` reads `critique.md` and exits **5**
+unless the verdict is `passed`, printing what to do instead. You cannot skip the revision pass by
+going straight to the upload — a run did exactly that, uploading 90 seconds after the critic wrote
+`gaps_found: 1`, with no revision and no second critique. If you genuinely disagree with the
+critique, `--force` exists, but say so in your reply to the user rather than using it quietly.
 - **`expert_needed: <question>`** or **`human_needed: <what is broken>`** → do **not** upload. Write the critic's specific question(s) as your final text output and stop.
 
 **Deterministic structural gate (before upload):**

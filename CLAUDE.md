@@ -99,7 +99,7 @@ measurement regarding power is quite off" reads as a sweeping result; the pictur
 that conversation showed the problem was in plotting/acquisition code and unrelated to
 the experiment it appeared to condemn.
 
-**Message text is passed as a FILE, never as a shell argument.** Write the message with the Write tool, then point `--text-file` at it. Putting message text in a `python -c` string or a shell argument is how backticks in a message got executed by bash — real words vanished from messages users received, and one failure printed a session cookie into the log.
+**Message text is passed as a FILE, never as a shell argument.** Write the message with the Write tool into **`$PROJECT_ROOT/.lore_tmp/`** (gitignored; create it if missing), then point `--text-file` at it — e.g. `.lore_tmp/progress_writing.txt`. Never write message files to the repo root: one report run left six loose `tmp_*.txt` progress posts sitting in the working tree as untracked files. Putting message text in a `python -c` string or a shell argument is how backticks in a message got executed by bash — real words vanished from messages users received, and one failure printed a session cookie into the log.
 
 Every command **verifies by reading back** what it did and exits non-zero if it cannot. Exit 0 means delivered *and confirmed*. Never tell the user something was sent or attached unless the command exited 0 — `ok: true` from a raw API call is not proof, and announcing unsent images cost four round-trips in one real thread.
 
@@ -144,7 +144,7 @@ All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from 
 | Check credentials are present | `python -c "from lab_agent.config import check_env; check_env()"` |
 | Check credentials actually **work** | `python -c "from lab_agent.config import check_env; check_env(live=True)"` |
 | Fetch an experiment | `python run.py "<github_url>" "<la_page>"…` — `--experiment-id NAME` when the code lives in another run's folder, `--reuse`/`--force` to override the collision guard |
-| Upload a report | `python upload_to_labarchives.py outputs/<id>` — `--report-file`, `--page-title`, `--new-page` |
+| Upload a report | `python upload_to_labarchives.py outputs/<id>` — `--report-file`, `--page-title`, `--new-page`. **Exits 5 unless `critique.md` says `passed`** — fix the critique's FAIL items via a report-writer revision pass, don't reach for `--force` |
 | Structural gate / drift | `python -m lab_agent.cli.eval check\|diff outputs/<id>` |
 | Report timings | `python -m lab_agent.cli.timings outputs/<id>` |
 | Record into the knowledge bundle | `python -m lab_agent.cli.record_knowledge outputs/<id> [--sign]` |

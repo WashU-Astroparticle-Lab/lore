@@ -64,3 +64,8 @@ cache/
 slack_upload_*.jpg
 slack_upload_*.png
 output.png
+
+# Scratch dir for Slack message bodies (--text-file). A report run left six
+# tmp_*.txt progress posts loose in the repo root; they belong here.
+.lore_tmp/
+tmp_*.txt

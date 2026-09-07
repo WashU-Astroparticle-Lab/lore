@@ -36,7 +36,12 @@ After the report, write `<out_dir>/slack_summary.md` — the message the lab act
 - Every number must appear in the report with the **same value and the same units**. Do not re-derive, re-round, or re-pair numbers with labels — copy them.
 - Every claim must carry the **same hedging as the report**. If the report says "consistent with", the summary says "consistent with" — never "confirms" or "confirmed".
 - No claim that is not in the report. No new interpretation.
-- End with the LabArchives location line: `LabArchives: <upload folder> / <page title>`.
+- End with the LabArchives location line, exactly: `LabArchives: <filled in on upload>`.
+  **Do not try to name the folder or page yourself.** You run before the upload, so you
+  cannot know where the report lands; `cli/upload.py` rewrites this line from the real
+  folder and page title just before posting. Asked to guess it once, a report shipped
+  `LabArchives: 20250904 Standalone Warm Amp Noise Digest / 20250904 Standalone Warm Amp
+  Noise Digest` — the source notes page named twice, instead of the report itself.
 - Plain text with Slack-flavoured markdown (`*bold*`, `-` bullets). No HTML, no tables, no images.
 
 This file is checked by the critic and posted verbatim. Getting a number or a hedge wrong here is exactly as serious as getting it wrong in the report — for most readers this *is* the report.
