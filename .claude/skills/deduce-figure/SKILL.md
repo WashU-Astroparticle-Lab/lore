@@ -56,6 +56,25 @@ Only ask the user which figure they mean once 1–5 have genuinely failed. And w
 
 **If it prints `COOKIE_REFRESH_NEEDED`:** run `python get_la_cookies.py` yourself (a figure question genuinely needs the cookie — this overrides the text-only "never refresh" rule). First post a short Slack heads-up (*"Refreshing the LabArchives session — please approve the Duo push on your phone"*), then run it and retry `fetch_page_images`. The script auto-skips if the cookie is still valid and auto-fills credentials; the only human step is the Duo tap (and only when off school wifi). Only if refresh fails/times out, tell the user.
 
+## Step 1c — if the run has a report, its numbers beat your read of the pixels
+
+Describing what a figure shows is valuable and wanted. Reading *numbers* off it when an
+exact value already exists is not — a visual read drifts, and it has drifted every time:
+"≤0.1 dB" where the report said 0.15, "~0.3 dB" where it said 0.35, and "~0.55 dB at
+−34 dBm" where both the report and the plot's own title say **0.35**. That last one is
+simply wrong, and 0.55 appears nowhere in the run.
+
+So when the figure comes from `outputs/<id>/`:
+
+1. Read the figure and describe it in your own words — that part stays.
+2. **Take every number from the report** (`[UNSIGNED] *.md`) or `provenance.md`, not from
+   your read of the image.
+3. If what you see genuinely disagrees with the report, **say so explicitly** — that is a
+   real finding worth surfacing, not something to quietly average away.
+
+A figure with no report behind it is the only case where your read is the source, and there
+you give an honest ± rather than a bare number.
+
 ## Step 2 — read the figure: cheap-by-default, precise-when-needed
 
 Accuracy on plots matters, but only pay the heavy read when the question needs it.
