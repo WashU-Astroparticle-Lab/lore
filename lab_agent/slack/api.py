@@ -250,17 +250,31 @@ def upload_file(
     return file_id
 
 
-def file_is_shared(file_id: str, channel: str) -> bool:
-    """Read an uploaded file back and confirm it reached *channel*."""
-    try:
-        body = api_get("files.info", {"file": file_id})
-    except SlackError:
-        return False
-    f = body.get("file", {})
-    shared = set(f.get("channels") or []) | set(f.get("groups") or []) | set(f.get("ims") or [])
-    for entries in (f.get("shares") or {}).values():
-        shared |= set(entries.keys())
-    return channel in shared
+def file_is_shared(file_id: str, channel: str, attempts: int = 5, delay: float = 0.8) -> bool:
+    """Read an uploaded file back and confirm it reached *channel*.
+
+    Retries, because ``files.completeUploadExternal`` returns before Slack has
+    indexed the share: a single immediate check reported "uploaded but not
+    visible" for three files that were already sitting in the thread. A
+    verification that fails closed on a race is worse than none — it made the
+    agent announce a permission problem that did not exist and invent an
+    explanation for it.
+    """
+    import time as _time
+
+    for attempt in range(attempts):
+        try:
+            f = api_get("files.info", {"file": file_id}).get("file", {})
+        except SlackError:
+            f = {}
+        shared = set(f.get("channels") or []) | set(f.get("groups") or []) | set(f.get("ims") or [])
+        for entries in (f.get("shares") or {}).values():
+            shared |= set(entries.keys())
+        if channel in shared:
+            return True
+        if attempt < attempts - 1:
+            _time.sleep(delay)
+    return False
 
 
 def list_channels(limit: int = 200) -> tuple[list[dict], str | None]:

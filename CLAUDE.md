@@ -103,6 +103,17 @@ the experiment it appeared to condemn.
 
 Every command **verifies by reading back** what it did and exits non-zero if it cannot. Exit 0 means delivered *and confirmed*. Never tell the user something was sent or attached unless the command exited 0 — `ok: true` from a raw API call is not proof, and announcing unsent images cost four round-trips in one real thread.
 
+**A non-zero exit is a reason to look, not a conclusion to report.** Verification can fail
+closed on a race. When `upload` says a file is not visible, check the thread with
+`read-thread` before telling the user anything: on one real run all three files were sitting
+in the thread while the check reported them missing, and the agent announced a Slack
+permission problem that did not exist.
+
+**The user sees Slack. You do not share your context with them.** Never say "as you can see
+above", "rendered in this session", or otherwise refer to anything that exists only in your
+own tool output. Reading an image yourself puts it in *your* context, not in their thread —
+if they should see it, it has to be uploaded, and confirmed.
+
 For anything the CLI does not cover, you may call the API directly — but use `lab_agent.slack.api.api_get` / `api_post`, which raise on `ok: false` instead of failing silently:
 
 ```bash

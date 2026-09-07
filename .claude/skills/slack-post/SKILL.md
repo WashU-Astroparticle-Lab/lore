@@ -75,7 +75,11 @@ python -m lab_agent.cli.slack upload --channel <C…> --file <fig1> --file <fig2
 - Message text goes in a **file**, never in a shell argument — backticks and quotes in a message have been executed by the shell, silently deleting words from what the user received.
 - Both commands **verify by reading back** and exit non-zero if they cannot. **Only report success on exit 0.** Announcing "both plots are in your thread now" when nothing had been shared cost three extra round-trips in one real exchange.
 - To attach figures to the message rather than trailing it, pass `--thread <ts of the posted message>`; `post` prints that ts.
-- If an upload fails, say which file and why, and do not describe the post as complete.
+- If an upload reports a failure, **check `read-thread` before reporting it** — the
+  verification can lose a race with Slack's indexing. One run reported all three files
+  "uploaded but not visible" while they were already in the thread, and the reply
+  invented a permission problem to explain it. Say which file and why only once you
+  have confirmed it really is absent.
 
 ## Step 4 — confirm precisely
 

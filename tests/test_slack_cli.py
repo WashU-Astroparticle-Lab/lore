@@ -181,6 +181,47 @@ def test_list_channels_falls_back_to_public() -> None:
         restore()
 
 
+def test_file_is_shared_survives_the_indexing_race() -> None:
+    """completeUploadExternal returns before Slack indexes the share.
+
+    A single immediate files.info check reported three files "uploaded but not
+    visible" while they were already in the thread — and the agent then told the
+    user there was a Slack permission problem, which there was not. Failing
+    closed on a race is worse than not checking.
+    """
+    # First two polls see nothing; the third sees the DM share.
+    restore = _patch_urlopen_sequence([
+        {"ok": True, "file": {"channels": [], "groups": [], "ims": []}},
+        {"ok": True, "file": {"channels": [], "groups": [], "ims": []}},
+        {"ok": True, "file": {"channels": [], "groups": [], "ims": ["D0ARUL9EDKR"]}},
+    ])
+    try:
+        check("a slow share is found on retry",
+              api.file_is_shared("F1", "D0ARUL9EDKR", attempts=4, delay=0) is True)
+    finally:
+        restore()
+
+    # A DM share can appear under shares.private rather than ims.
+    restore = _patch_urlopen_sequence([
+        {"ok": True, "file": {"shares": {"private": {"D0ARUL9EDKR": [{"ts": "1.2"}]}}}},
+    ])
+    try:
+        check("shares.private counts as shared",
+              api.file_is_shared("F1", "D0ARUL9EDKR", attempts=1, delay=0) is True)
+    finally:
+        restore()
+
+    # A genuinely absent file must still come back False.
+    restore = _patch_urlopen_sequence([
+        {"ok": True, "file": {"channels": ["C999"], "ims": []}},
+    ])
+    try:
+        check("a file shared elsewhere is still not in this channel",
+              api.file_is_shared("F1", "D0ARUL9EDKR", attempts=1, delay=0) is False)
+    finally:
+        restore()
+
+
 def test_dm_event_text() -> None:
     check("plain text wakes the bot", api.dm_event_text({"text": "hello"}) == "hello")
     check("bot echoes are ignored", api.dm_event_text({"text": "hi", "bot_id": "B1"}) is None)
@@ -212,5 +253,6 @@ if __name__ == "__main__":
     test_api_raises_on_not_ok()
     test_upload_rejects_empty_file()
     test_list_channels_falls_back_to_public()
+    test_file_is_shared_survives_the_indexing_race()
     test_dm_event_text()
     print(f"\ntest_slack_cli: {PASSED} checks passed")
