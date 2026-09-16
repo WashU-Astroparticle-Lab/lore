@@ -9,7 +9,10 @@ makes the wrong page surface becomes a loud failure instead of a wrong answer we
 It does NOT test the LLM figure read or the exact numeric answer — those are non-deterministic
 and vary per run. This tests only "did the right source get surfaced", which is deterministic.
 
-Cases live in ``eval/qa_cases.jsonl``; each line is one of:
+Cases live in ``eval/qa_cases.jsonl``. That file names real notebook pages, so it is
+kept out of the repo and lives only on the lab machine; ``eval/qa_cases.example.jsonl``
+is a committed, synthetic copy showing the format and the cases worth writing. Each line
+is one of:
   {"q": "...", "expect_page": "la_page:<name>"}   # expected page must be in the candidates
   {"q": "...", "expect_no_id": true}              # no identifier in q may falsely resolve
 
