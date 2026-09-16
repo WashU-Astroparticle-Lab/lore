@@ -40,17 +40,17 @@ def _mkdir_with_meta(github_url: str, la_pages: list[str]) -> Path:
 
 
 def test_gh_identity_ignores_ref() -> None:
-    base = "https://github.com/WashU-Astroparticle-Lab/analysis_archive"
+    base = "https://github.com/example-lab/experiments"
     a = f"{base}/tree/816564918222a5825a7f668e5bdc84fe9884ff9b/DAQ/presto_vna_spectrum_20260826"
     b = f"{base}/tree/b1e0501477ff2937e979051ff1c45197379b461e/DAQ/presto_vna_spectrum_20260826"
     check("same folder at different commits has one identity", _gh_identity(a) == _gh_identity(b))
     check(
         "identity is owner/repo/subpath",
-        _gh_identity(a) == "WashU-Astroparticle-Lab/analysis_archive/DAQ/presto_vna_spectrum_20260826",
+        _gh_identity(a) == "example-lab/experiments/DAQ/presto_vna_spectrum_20260826",
     )
     check("different subpath differs", _gh_identity(a) != _gh_identity(f"{base}/tree/main/DAQ/other"))
     check("empty url is empty identity", _gh_identity(None) == "" and _gh_identity("") == "")
-    check("bare repo url does not crash", _gh_identity(base) == "WashU-Astroparticle-Lab/analysis_archive")
+    check("bare repo url does not crash", _gh_identity(base) == "example-lab/experiments")
 
 
 def test_guard_allows_plain_rerun() -> None:
@@ -69,8 +69,8 @@ def test_guard_allows_plain_rerun() -> None:
 
 def test_guard_blocks_the_real_collision() -> None:
     # Exactly the Aug 26 -> Aug 31 case: same GitHub folder, different LA pages.
-    prev = "https://github.com/WashU-Astroparticle-Lab/analysis_archive/tree/8165649/DAQ/presto_vna_spectrum_20260826"
-    now = "https://github.com/WashU-Astroparticle-Lab/analysis_archive/tree/b1e0501/DAQ/presto_vna_spectrum_20260826"
+    prev = "https://github.com/example-lab/experiments/tree/8165649/DAQ/presto_vna_spectrum_20260826"
+    now = "https://github.com/example-lab/experiments/tree/b1e0501/DAQ/presto_vna_spectrum_20260826"
     d = _mkdir_with_meta(prev, [])
     try:
         _guard_out_dir(d, now, ["[Signed] presto_vna_spectrum_20260831 (copy)"])

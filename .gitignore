@@ -69,3 +69,12 @@ output.png
 # tmp_*.txt progress posts loose in the repo root; they belong here.
 .lore_tmp/
 tmp_*.txt
+
+# Lab data and internal planning: kept locally, never published.
+# tests/golden holds a real experiment (another member's verbatim LabArchives
+# notes, unpublished results, a link into a private repo). eval/qa_cases.jsonl
+# holds real page titles.
+tests/golden/
+eval/qa_cases.jsonl
+docs/live_test_plan.md
+docs/ux_roadmap.md

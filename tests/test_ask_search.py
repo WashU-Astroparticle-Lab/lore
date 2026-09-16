@@ -77,7 +77,7 @@ def test_resolve_identifiers_maps_chip_id_to_its_page():
         ask.KNOWLEDGE_ROOT = kb
         la = kb / "labarchives"
         la.mkdir(parents=True)
-        (la / "20260702_JPL_QPDs.md").write_text(
+        (la / "20260702_Detector_QPDs.md").write_text(
             "QC traces and quantum capacitance discussion. See "
             "https://github.com/x/BE260416-NG-D1-CPB_qct_20260709.ipynb for the data.",
             encoding="utf-8")
@@ -91,7 +91,7 @@ def test_resolve_identifiers_maps_chip_id_to_its_page():
         assert kw_top == ["la_page:20260402_Meeting_Notes"], kw_top
         # …but the identifier resolver keys on the rare ID and nails the right page.
         id_hits = ask.resolve_identifiers(q, 5)
-        assert id_hits and id_hits[0][2] == "la_page:20260702_JPL_QPDs", id_hits
+        assert id_hits and id_hits[0][2] == "la_page:20260702_Detector_QPDs", id_hits
         assert all("Meeting" not in src for _n, _o, src in id_hits)
 
 

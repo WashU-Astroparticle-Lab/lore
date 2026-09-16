@@ -31,6 +31,11 @@ TOP_K = 6
 
 
 def load_cases(path: Path) -> list[dict]:
+    # The case file quotes real LabArchives page titles, so it is kept out of
+    # the repo and lives only on the lab machine. A fresh clone has none:
+    # return empty rather than raising, and let the caller say so.
+    if not path.is_file():
+        return []
     cases = []
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()

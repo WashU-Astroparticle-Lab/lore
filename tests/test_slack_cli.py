@@ -193,21 +193,21 @@ def test_file_is_shared_survives_the_indexing_race() -> None:
     restore = _patch_urlopen_sequence([
         {"ok": True, "file": {"channels": [], "groups": [], "ims": []}},
         {"ok": True, "file": {"channels": [], "groups": [], "ims": []}},
-        {"ok": True, "file": {"channels": [], "groups": [], "ims": ["D0ARUL9EDKR"]}},
+        {"ok": True, "file": {"channels": [], "groups": [], "ims": ["D0TEST12345"]}},
     ])
     try:
         check("a slow share is found on retry",
-              api.file_is_shared("F1", "D0ARUL9EDKR", attempts=4, delay=0) is True)
+              api.file_is_shared("F1", "D0TEST12345", attempts=4, delay=0) is True)
     finally:
         restore()
 
     # A DM share can appear under shares.private rather than ims.
     restore = _patch_urlopen_sequence([
-        {"ok": True, "file": {"shares": {"private": {"D0ARUL9EDKR": [{"ts": "1.2"}]}}}},
+        {"ok": True, "file": {"shares": {"private": {"D0TEST12345": [{"ts": "1.2"}]}}}},
     ])
     try:
         check("shares.private counts as shared",
-              api.file_is_shared("F1", "D0ARUL9EDKR", attempts=1, delay=0) is True)
+              api.file_is_shared("F1", "D0TEST12345", attempts=1, delay=0) is True)
     finally:
         restore()
 
@@ -217,7 +217,7 @@ def test_file_is_shared_survives_the_indexing_race() -> None:
     ])
     try:
         check("a file shared elsewhere is still not in this channel",
-              api.file_is_shared("F1", "D0ARUL9EDKR", attempts=1, delay=0) is False)
+              api.file_is_shared("F1", "D0TEST12345", attempts=1, delay=0) is False)
     finally:
         restore()
 

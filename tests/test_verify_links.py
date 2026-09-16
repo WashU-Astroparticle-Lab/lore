@@ -39,9 +39,9 @@ def test_labarchives_not_checked_no_network():
 
 def test_github_regex_builds_contents_api_path():
     m = vl._GITHUB_TREE_BLOB_RE.match(
-        "https://github.com/WashU-Astroparticle-Lab/analysis_archive/tree/ac7ee2a1/DAQ/exp")
-    assert m.group("owner") == "WashU-Astroparticle-Lab"
-    assert m.group("repo") == "analysis_archive"
+        "https://github.com/example-lab/experiments/tree/ac7ee2a1/DAQ/exp")
+    assert m.group("owner") == "example-lab"
+    assert m.group("repo") == "experiments"
     assert m.group("ref") == "ac7ee2a1"
     assert m.group("path") == "DAQ/exp"
 

@@ -22,7 +22,7 @@ For two sub-capabilities this skill delegates (single source of truth — don't 
 
    then Read the matching `knowledge/labarchives/<safe_page_name>.md` — the full page text, already on disk, **free and instant**. Answer from it.
 
-   The graph is built for questions that span pages; on a single named page it is both slower and worse. Asked to summarise `20260702 JPL QPDs`, `query_kb` spent 69 s and came back thin — while the entire page text sat in the corpus unread. Reserve steps 1–2 for genuinely cross-page questions ("which chips have we measured", "have we ever seen X"), where the graph is strong.
+   The graph is built for questions that span pages; on a single named page it is both slower and worse. Asked to summarise `a single dense device page`, `query_kb` spent 69 s and came back thin — while the entire page text sat in the corpus unread. Reserve steps 1–2 for genuinely cross-page questions ("which chips have we measured", "have we ever seen X"), where the graph is strong.
 
    If no corpus file matches the name, fall through to step 1.
 
