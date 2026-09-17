@@ -95,6 +95,30 @@ def test_cli_error_detection():
     assert cli_error_message(long_answer) is None, "false positive on a long answer"
 
 
+def test_embedding_limit_is_read_from_the_model_not_hardcoded():
+    """The declared max_token_size must equal the model's real input window.
+
+    Regression guard for a measured defect: graph.py declared 8192 while
+    all-MiniLM-L6-v2 accepts 256, which disabled LightRAG's own truncation
+    warning and let sentence-transformers drop a mean 56% of 201 of 235 chunks
+    in silence. A literal number here is the bug; the value has to come off the
+    model so a model swap cannot reintroduce the mismatch.
+    """
+    import inspect
+
+    from lab_agent.rag import graph as g
+
+    src = inspect.getsource(g._local_embed_func)
+    assert "max_token_size=limit" in src, (
+        "max_token_size is not wired to the model's own limit"
+    )
+    assert "model.max_seq_length" in src, (
+        "the limit is not read from the model"
+    )
+    for bad in ("max_token_size=8192", "max_token_size=1024", "max_token_size=512"):
+        assert bad not in src, f"hardcoded embedding window is back: {bad}"
+
+
 if __name__ == "__main__":
     import sys
 

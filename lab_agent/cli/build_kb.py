@@ -69,8 +69,15 @@ def _gather_corpus() -> dict[str, str]:
 def _build_index(full: bool = False) -> None:
     """Incrementally refresh the LightRAG KG — only new/changed docs are (re-)indexed.
 
-    The manifest fingerprints each indexed doc so unchanged pages cost no LLM tokens;
-    ``--full`` forces a from-scratch rebuild (ignore the manifest).
+    The manifest fingerprints each indexed doc so unchanged pages cost no LLM tokens.
+
+    ``--full`` **ignores the manifest; it is not a from-scratch rebuild.** The existing
+    vector stores stay on disk, so it cannot be used to change the embedding model: the
+    vdb files keep the old dimension and every insert dies with "Embedding dim mismatch".
+    It also writes an empty manifest *before* inserting, so an aborted ``--full`` leaves
+    a populated graph with no manifest and the next refresh re-extracts everything.
+    To swap embedding models, start from a clean KB directory —
+    see ``docs/embedding_model_swap.md``.
     """
     from ..config import kb_dir
     from ..rag import KnowledgeGraph, backend_available

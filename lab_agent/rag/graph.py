@@ -123,18 +123,37 @@ class KnowledgeGraph:
 # ---------------------------------------------------------------------------
 
 def _local_embed_func():
-    """Local sentence-transformer embedding function (no data leaves the machine)."""
+    """Local sentence-transformer embedding function (no data leaves the machine).
+
+    ``max_token_size`` is **read from the model, never hardcoded.** LightRAG uses it
+    to truncate over-long content *visibly* (with a warning) before embedding;
+    declaring more than the model accepts disables that guard, and
+    sentence-transformers then truncates silently instead.
+
+    This was a real, measured defect: a hardcoded 8192 against MiniLM's actual
+    256-token window meant 201 of 235 chunks were embedded from their opening
+    fifth, discarding a mean 56% of each. The dropped tails were not redundant —
+    median cosine to their own head was 0.51 — so the semantic index was missing
+    content nobody could see was missing. Reading the limit off the model means a
+    model swap updates it automatically and the two can never drift apart again.
+    """
     from lightrag.utils import EmbeddingFunc
     from sentence_transformers import SentenceTransformer
 
     model_name = os.environ.get("KB_EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
     model = SentenceTransformer(model_name)
     dim = model.get_sentence_embedding_dimension()
+    limit = int(model.max_seq_length)
+    print(f"[kb] embeddings: {model_name} — {dim} dims, {limit}-token window", flush=True)
+    if limit < 512:
+        print(f"[kb] WARNING: a {limit}-token window truncates typical notebook chunks. "
+              "Set KB_EMBEDDING_MODEL to a long-context model (e.g. BAAI/bge-m3) "
+              "and rebuild with --full.", flush=True)
 
     async def _embed(texts: list[str]):
         return model.encode(texts, normalize_embeddings=True)
 
-    return EmbeddingFunc(embedding_dim=dim, max_token_size=8192, func=_embed)
+    return EmbeddingFunc(embedding_dim=dim, max_token_size=limit, func=_embed)
 
 
 async def _claude_code_llm_func(prompt, system_prompt=None, history_messages=None, **kwargs) -> str:
