@@ -86,7 +86,7 @@ LA_SECRET=...                  # full password (~30 chars)
 LA_UID=...
 
 # LabArchives WashU SSO (for session cookie refresh)
-LA_EMAIL_WU=you@wustl.edu
+LA_EMAIL_WU=you@your-institution.edu
 LA_PASSWORD_WU=...
 
 # Slack

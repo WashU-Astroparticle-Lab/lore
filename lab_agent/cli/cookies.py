@@ -1,5 +1,6 @@
 """
-Log into LabArchives via WashU SSO (headed Playwright browser) and update
+Log into LabArchives via your institution's SSO (headed Playwright browser)
+and update
 LA_SESSION_COOKIE in .env automatically (invoked via the root-level
 get_la_cookies.py shim).
 
@@ -16,7 +17,7 @@ import sys
 
 from dotenv import dotenv_values
 
-from ..config import ENV_PATH
+from ..config import ENV_PATH, lab_config_value
 from ..sources.labarchives.auth import cookies_still_valid
 
 
@@ -40,7 +41,7 @@ def main() -> None:
         print("LA_SESSION_COOKIE is still valid — no login needed.")
         sys.exit(0)
 
-    print("Existing cookies expired or missing. Opening browser for WashU SSO login...")
+    print("Existing cookies expired or missing. Opening browser for SSO login...")
     print("If Duo MFA is required, approve the push notification on your phone.")
     print()
 
@@ -52,23 +53,27 @@ def main() -> None:
         # Step 1: go to LabArchives login
         page.goto("https://auth-service.labarchives.com/", wait_until="networkidle")
 
-        # Step 2: select WashU institution
+        # Step 2: select the institution. The label and the login-form field ids
+        # below are specific to one university's SSO, so they live in lab_config.md
+        # rather than here -- another lab changes config, not code.
+        institution = lab_config_value("SSO institution label")
         try:
-            page.select_option("select", label="Washington University in St. Louis")
+            page.select_option("select", label=institution)
             page.click("text=Go to Institution's Login")
             page.wait_for_load_state("networkidle")
         except Exception as e:
             print(f"Note: institution selector step skipped ({e})")
 
-        # Step 3: fill WashU login form
+        # Step 3: fill the institution login form
+        form = lab_config_value("SSO form prefix")
         try:
-            page.wait_for_selector("#ucWUSTLKeyLogin_txtUsername", timeout=10_000)
-            page.fill("#ucWUSTLKeyLogin_txtUsername", email)
-            page.fill("#ucWUSTLKeyLogin_txtPassword", password)
-            page.click("#ucWUSTLKeyLogin_btnLogin")
+            page.wait_for_selector(f"{form}txtUsername", timeout=10_000)
+            page.fill(f"{form}txtUsername", email)
+            page.fill(f"{form}txtPassword", password)
+            page.click(f"{form}btnLogin")
             print("Credentials submitted. Waiting for MFA / redirect (up to 3 min)...")
         except PWTimeout:
-            print("Could not find WashU login form. Complete login manually in the browser, then press Enter.")
+            print("Could not find the institution login form. Complete login manually in the browser, then press Enter.")
             input()
 
         # Step 4: wait for successful login

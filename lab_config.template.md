@@ -32,6 +32,8 @@ The following keys must be present in `.env`. The agent checks these by name:
 | Other notebooks | Additional notebook names, comma-separated |
 | Upload folder | Folder name inside the primary notebook where reports are uploaded |
 | Wiring diagram page | Page title of your fridge wiring / RF attenuation diagram |
+| SSO institution label | Exact institution name in the LabArchives login dropdown |
+| SSO form prefix | CSS id prefix of your SSO username/password/submit fields, e.g. `#myLogin_` |
 
 ## Security (optional)
 

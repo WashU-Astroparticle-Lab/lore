@@ -174,7 +174,7 @@ class LabArchivesAdapter(ImageDownloadMixin):
     --------------
     Reads credentials from environment variables:
 
-      LA_AKID      Access Key ID  (e.g. "Washington_StL_TeWgHN")
+      LA_AKID      Access Key ID  (e.g. "YourInstitution_AbCdEf")
       LA_SECRET    Institutional API password — HMAC-SHA512 signing key
       LA_UID       Permanent numeric user ID
       LA_BASE_URL  Optional API host override
