@@ -24,7 +24,7 @@ import os
 import re
 import sys
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from ..cli import ask
@@ -35,12 +35,15 @@ EXPERIMENTS_DIR = KNOWLEDGE_ROOT / "experiments"
 
 # The only settings this process may take from .env. Every credential is deliberately
 # absent: nothing here needs one, so nothing here should be able to leak one.
-SAFE_ENV_KEYS = ("KB_STORAGE_DIR", "KB_SERVICE_PORT", "KB_EMBEDDING_MODEL", "KB_REFRESH_HOUR")
+SAFE_ENV_KEYS = ("KB_STORAGE_DIR", "KB_SERVICE_PORT", "KB_EMBEDDING_MODEL", "KB_REFRESH_HOUR",
+                 "DR_DATA_PATH")
 
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 PAGE_TEXT_LIMIT = 60_000     # characters read_page returns before truncating
 GRAPH_TIMEOUT_S = 180.0      # a graph answer makes a model call on LORE's side
 MAX_K = 20
+DR_MAX_HOURS = 72.0          # a window this long reads a few MB; longer is a report's job
+DR_STALE_MINUTES = 15        # the log normally gains a row every few seconds
 
 HUMAN_PAGE = "lab notebook page (written by people)"
 MACHINE_SUMMARY = "LORE's summary of a past run (machine-written)"
@@ -283,6 +286,61 @@ def ask_graph(question: str) -> dict:
 
 
 @_quiet
+def dr_status(hours: float = 2.0, now: datetime | None = None) -> dict:
+    """The dilution refrigerator's thermometry over the last ``hours``, from its own logs."""
+    from ..dr.live import recent_thermometry
+
+    try:
+        hours = max(0.1, min(float(hours), DR_MAX_HOURS))
+    except (TypeError, ValueError):
+        hours = 2.0
+    data_path = os.environ.get("DR_DATA_PATH", "")
+    if not data_path:
+        return {"available": False,
+                "note": "DR_DATA_PATH is not set on LORE's machine, so the fridge logs "
+                        "cannot be found. Carry on without them."}
+
+    end = now or datetime.now()
+    result = recent_thermometry(data_path, end - timedelta(hours=hours), end)
+    if "reason" in result:
+        return {"available": False, "note": result["reason"]}
+
+    warnings = []
+    newest = result["newest_reading_at"]
+    if newest is None:
+        warnings.append(f"No thermometer reading in the last {hours:g} h. The fridge's "
+                        "logging may have stopped; that says nothing about the fridge "
+                        "itself. Check it directly or ask a person.")
+    else:
+        age_min = (end - datetime.fromisoformat(newest)).total_seconds() / 60
+        if age_min > DR_STALE_MINUTES:
+            warnings.append(f"The newest reading is {age_min:.0f} min old; the log "
+                            "normally updates every few seconds, so logging may have "
+                            "stopped. Treat these values as stale.")
+    stale_other = [name for name, when in result["other_logs_last_written"].items()
+                   if when is None or when < result["window_start"]]
+    if stale_other:
+        warnings.append("No pressure, flow or pulse-tube data: those logs ("
+                        + ", ".join(stale_other) + ") have not been written during this "
+                        "window. Only thermometry is available.")
+
+    return {
+        "available": result["found"],
+        "units": "mK, as logged by the fridge software",
+        "window": {"hours": hours, "start": result["window_start"], "end": result["window_end"]},
+        "newest_reading_at": newest,
+        "channels": result["channels"],
+        "warnings": warnings,
+        "source": {"files_read": result["files_read"],
+                   "stub_files_skipped": result["stub_files_skipped"],
+                   "other_logs_last_written": result["other_logs_last_written"]},
+        "note": ("Read-only view of the fridge's own log on LORE's machine; channel names "
+                 "come from the log header. The fridge's controls and alarms are "
+                 "authoritative, not this. Labels with [MC] are on the mixing chamber."),
+    }
+
+
+@_quiet
 def status() -> dict:
     """What LORE knows, how fresh it is, and what it cannot see."""
     from ..rag import service
@@ -307,7 +365,8 @@ def status() -> dict:
     limits = [
         "Knowledge is only as fresh as the last crawl; notes written after it are not visible.",
         "The graph covers notebook pages only, not Slack or LORE's own reports.",
-        "LORE cannot see instruments or raw data files, only what people wrote down.",
+        "Apart from the dilution refrigerator's thermometry log (dr_status), LORE cannot "
+        "see instruments or raw data files, only what people wrote down.",
     ]
     if model == DEFAULT_EMBEDDING_MODEL:
         limits.append("The current embedding model reads only the opening of each passage "

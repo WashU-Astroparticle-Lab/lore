@@ -12,7 +12,8 @@ Claude Code ── ssh (key can only start LORE's tools) ──► lore_mcp.cmd
                                                                └ asks the warm graph service
 ```
 
-**What it can do:** `status`, `resolve`, `read_page`, `search`, `ask_graph`. All read-only.
+**What it can do:** `status`, `resolve`, `read_page`, `search`, `ask_graph`, and `dr_status`
+(the fridge's thermometry, read from its own log; needs `DR_DATA_PATH` in `.env`). All read-only.
 **What it cannot do:** write, upload, post to Slack, fetch from LabArchives, rebuild the
 graph, or read any credential. `tests/test_mcp_server.py` enforces all of that.
 
@@ -234,7 +235,7 @@ your laptop is a different install without LORE's packages):
 C:\Users\axelr\miniconda3\python.exe -m lab_agent.mcp_server --probe ssh -i C:/Users/axelr/.ssh/lore_mcp -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new LABUSER@LABHOST
 ```
 
-Expected: **OK: server 'lore' answered**, with the five tools and the page count. **This
+Expected: **OK: server 'lore' answered**, with the six tools and the page count. **This
 proves the forced command, the launcher and the protocol all work through SSH**, using the
 exact exchange Claude Code will perform.
 

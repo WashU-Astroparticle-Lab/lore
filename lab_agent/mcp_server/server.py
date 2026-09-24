@@ -34,6 +34,12 @@ Search cheapest-first:
    numbers with read_page() on the pages it cites.
 Call status() to see what LORE knows and how fresh it is.
 
+The fridge: dr_status() reads the dilution refrigerator's own thermometry log on LORE's
+machine (mK, latest reading and min/median/max over the last few hours). Use it to
+record the fridge's state alongside a measurement, or to understand a surprising result.
+It is not an alarm: if it shows something alarming, or warns that logging stopped, note
+it and tell a person. Never stop, change or repeat a measurement because of it.
+
 Weighing results: every result says who wrote it. Notebook pages were written by people
 during the work. LORE's summaries and extractions are machine-written. Values read off
 plots carry reading uncertainty. Put the chip and session in your question so the answer
@@ -107,6 +113,20 @@ async def ask_graph(
     answer is written by a model: confirm key numbers with read_page(). Also returns
     candidate pages from an exact-identifier and keyword pass the graph can miss."""
     return await anyio.to_thread.run_sync(core.ask_graph, question)
+
+
+@mcp.tool()
+async def dr_status(
+    hours: Annotated[float, Field(description=(
+        "How far back to look, in hours (0.1-72). 2 is a good check of the current state; "
+        "longer shows a trend or when an event happened."))] = 2.0,
+) -> dict:
+    """The dilution refrigerator's temperatures from its own log: for each thermometer
+    (mixing chamber, 50 mK plate, still, 3 K plate...), the latest reading with its time,
+    and min / median / max over the window, all in mK. Warns if the log has stopped
+    updating. Thermometry only; no pressures. Read-only and advisory: the fridge's own
+    controls and alarms are authoritative. Instant and free."""
+    return await anyio.to_thread.run_sync(core.dr_status, hours)
 
 
 def run() -> None:

@@ -16,13 +16,14 @@ import os
 import socket
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 import lab_agent.cli.ask as ask
 from lab_agent.config import PROJECT_ROOT
 from lab_agent.mcp_server import core
 
-EXPECTED_TOOLS = {"status", "resolve", "read_page", "search", "ask_graph"}
+EXPECTED_TOOLS = {"status", "resolve", "read_page", "search", "ask_graph", "dr_status"}
 
 # Modules that can write to the notebook, post to Slack, fetch with credentials, run the
 # report pipeline or rebuild the graph. The server must never pull any of them in.
@@ -217,6 +218,110 @@ def test_graph_tools_degrade_cleanly_when_the_service_is_down():
             os.environ["KB_SERVICE_PORT"] = saved
 
 
+# A LogLCR file as the Leiden software writes it: "#", a blank line, column names, the
+# channel labels, then tab-separated rows. The labels are the 2026 wiring, which is
+# where the old fixed-column parser went wrong.
+_LCR_NAMES = "Date1\tDate2\tR0\tR1\tT0\tT1\tT2\tT3\tT4\tT5\tT6\tT7"
+_LCR_LABELS = ("Date(String)\tDate(Number)\tC_still [Still]\t3K Plate\t"
+               "C_still [Still]\t3K Plate\tStill Plate\tTT-26006 [MC]\tCMN223 [MC P]\t"
+               "OPEN\t50mK Plate\t")
+
+
+def _lcr_row(ts, t0="1.9E-12", t1="2.89E+3", t2="792.2E+0", t3="46.8E+0", t4="12.48E+0",
+             t5="0.0E+0", t6="66.7E+0", t7="-Inf"):
+    return "\t".join([ts, "3.87E+9", "1.0", "2.0", t0, t1, t2, t3, t4, t5, t6, t7])
+
+
+def _write_lcr(folder: Path, name: str, rows: list[str], header: bool = True,
+               mtime: datetime | None = None) -> Path:
+    path = folder / name
+    head = ["#", "", _LCR_NAMES, _LCR_LABELS] if header else []
+    path.write_text("\n".join(head + rows) + "\n", encoding="utf-8")
+    if mtime is not None:
+        os.utime(path, (mtime.timestamp(), mtime.timestamp()))
+    return path
+
+
+@contextlib.contextmanager
+def _dr_folder():
+    saved = os.environ.get("DR_DATA_PATH")
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["DR_DATA_PATH"] = tmp
+        try:
+            yield Path(tmp)
+        finally:
+            if saved is None:
+                os.environ.pop("DR_DATA_PATH", None)
+            else:
+                os.environ["DR_DATA_PATH"] = saved
+
+
+def test_dr_status_takes_labels_from_the_log_header():
+    now = datetime(2026, 9, 24, 18, 0, 0)
+    with _dr_folder() as d:
+        _write_lcr(d, "LogLCR___2026-09-24-15-02-58_0.dat", [
+            _lcr_row("2026-09-24 17:50:00", t4="12.60E+0"),
+            _lcr_row("2026-09-24 17:59:30", t3="NaN", t4="12.44E+0"),
+        ])
+        r = core.dr_status(2, now=now)
+    ch = r["channels"]
+    assert r["available"] and r["units"].startswith("mK"), r
+    # mK values survive; the old parser's kelvin limits dropped every MC reading.
+    assert ch["CMN223 [MC P]"]["latest_mK"] == 12.44, ch
+    assert ch["CMN223 [MC P]"]["max_mK"] == 12.6 and ch["CMN223 [MC P]"]["n"] == 2, ch
+    # Labels are the header's: the MC thermometer is not filed under "4K".
+    assert "TT-26006 [MC]" in ch and ch["TT-26006 [MC]"]["latest_mK"] == 46.8, ch
+    assert ch["TT-26006 [MC]"]["n"] == 1, "a NaN row must not count as a reading"
+    assert "3K Plate" in ch and "50mK Plate" in ch and "Still Plate" in ch, ch
+    # The still's capacitance gauge, unused OPEN slots and unlabelled -Inf columns are not
+    # thermometers.
+    assert not any(k.startswith("C_") or k == "OPEN" or not k for k in ch), sorted(ch)
+    # Fresh readings: the only warning is that this folder has no pressure log.
+    assert all("pressure" in w for w in r["warnings"]), r["warnings"]
+
+
+def test_dr_status_merges_segments_and_skips_what_it_cannot_trust():
+    now = datetime(2026, 9, 24, 18, 0, 0)
+    with _dr_folder() as d:
+        # Parallel segments of one session: the newest reading is in _1, not _0.
+        _write_lcr(d, "LogLCR___2026-09-24-15-02-58_0.dat", [_lcr_row("2026-09-24 17:40:00")])
+        _write_lcr(d, "LogLCR___2026-09-24-15-02-58_1.dat",
+                   [_lcr_row("2026-09-24 17:58:00", t4="11.90E+0")])
+        # A header-less stub: its columns cannot be named, so it is never read.
+        _write_lcr(d, "LogLCR___2026-09-24-15-02-58.dat",
+                   [_lcr_row("2026-09-24 17:59:59", t4="999.0E+0")], header=False)
+        # An old session last written long before the window: never opened.
+        old = _write_lcr(d, "LogLCR___2026-07-04-17-42-42_3.dat",
+                         [_lcr_row("2026-09-24 17:59:00", t4="777.0E+0")],
+                         mtime=datetime(2026, 7, 10, 16, 55))
+        r = core.dr_status(2, now=now)
+    mc = r["channels"]["CMN223 [MC P]"]
+    assert mc["latest_mK"] == 11.9 and mc["latest_at"] == "2026-09-24 17:58:00", mc
+    assert mc["max_mK"] < 100, "a stub or an out-of-window file leaked into the readings"
+    assert r["source"]["stub_files_skipped"] == ["LogLCR___2026-09-24-15-02-58.dat"], r["source"]
+    assert old.name not in r["source"]["files_read"], r["source"]
+
+
+def test_dr_status_says_when_it_cannot_be_trusted():
+    now = datetime(2026, 9, 24, 18, 0, 0)
+    with _dr_folder() as d:
+        _write_lcr(d, "LogLCR___2026-09-24-15-02-58_0.dat", [_lcr_row("2026-09-24 17:00:00")])
+        stale = core.dr_status(2, now=now)
+        assert any("stale" in w for w in stale["warnings"]), stale["warnings"]
+        assert any("pressure" in w for w in stale["warnings"]), (
+            "with no current pressure log the caller must be told, not left to assume")
+        assert core.dr_status(10_000, now=now)["window"]["hours"] == core.DR_MAX_HOURS
+        empty = core.dr_status(0.5, now=now)
+        assert empty["available"] is False and "logging may have stopped" in empty["warnings"][0]
+    saved = os.environ.pop("DR_DATA_PATH", None)
+    try:
+        unset = core.dr_status(2, now=now)
+        assert unset["available"] is False and "DR_DATA_PATH" in unset["note"], unset
+    finally:
+        if saved is not None:
+            os.environ["DR_DATA_PATH"] = saved
+
+
 def test_tools_never_write_to_stdout():
     @core._quiet
     def noisy():
@@ -228,6 +333,9 @@ def test_tools_never_write_to_stdout():
         assert noisy() == "ok"
         with _corpus({"p": "text"}):
             core.resolve("BE1"), core.read_page("p"), core.search("text"), core.status()
+        with _dr_folder() as d:
+            _write_lcr(d, "LogLCR___2026-09-24-15-02-58_0.dat", [_lcr_row("2026-09-24 17:59:00")])
+            core.dr_status(2, now=datetime(2026, 9, 24, 18, 0, 0))
     assert captured.getvalue() == "", f"stdout was written: {captured.getvalue()!r}"
 
 
