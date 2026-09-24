@@ -36,7 +36,8 @@ rag = ["lightrag-hku", "sentence-transformers"]
 # Read-only MCP server so another agent (e.g. on the DAQ machine) can query LORE.
 # Needs only the MCP SDK and python-dotenv, so it can also live in its own small env.
 # See docs/mcp_ssh_setup.md.
-mcp = ["mcp>=1.26", "python-dotenv"]
+# <2: mcp 2.x renamed FastMCP (mcp.server.fastmcp is gone), which server.py imports.
+mcp = ["mcp>=1.26,<2", "python-dotenv"]
 
 [tool.setuptools.packages.find]
 include = ["lab_agent*"]

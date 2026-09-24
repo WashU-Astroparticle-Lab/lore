@@ -42,6 +42,11 @@ def handshake(command: list[str], cwd: Path | None = None, env_extra: dict | Non
     from mcp.client.stdio import StdioServerParameters, get_default_environment, stdio_client
 
     env = get_default_environment()
+    # The SDK's default environment omits PROGRAMDATA, and Windows' ssh.exe exits 255
+    # without a word when it is missing, so --probe over ssh failed with only
+    # "Connection closed". Any MCP client that launches ssh.exe needs it set.
+    if os.name == "nt" and os.environ.get("PROGRAMDATA"):
+        env.setdefault("PROGRAMDATA", os.environ["PROGRAMDATA"])
     env.update(env_extra or {})
     params = StdioServerParameters(command=command[0], args=command[1:], env=env,
                                    cwd=str(cwd) if cwd else None)
@@ -163,9 +168,37 @@ def _is_windows_admin_member() -> bool | None:
     return "S-1-5-32-544" in out
 
 
+def _is_store_python() -> bool:
+    """Whether this interpreter is the Microsoft Store Python, directly or as a venv base."""
+    return os.name == "nt" and any(
+        "WindowsApps" in p for p in (sys.executable, sys.prefix, sys.base_prefix))
+
+
+_STORE_PYTHON_REFUSAL = """\
+This is the Microsoft Store Python, which cannot serve LORE over SSH:
+
+  * Under an SSH logon Windows often refuses to start it ("Unable to create process
+    ... Access is denied"), so the agent's connection closes with no MCP reply.
+  * It silently redirects writes under AppData\\Local into its own package folder, so
+    the launcher this command writes there is invisible to sshd.
+
+Use a python.org Python for the MCP server instead. It needs no installer or admin:
+the NuGet package is a plain zip (https://www.nuget.org/packages/python), for example
+unpacked to C:\\lore_mcp\\py313, then
+
+  C:\\lore_mcp\\py313\\python.exe -m pip install "mcp>=1.26,<2" python-dotenv
+  C:\\lore_mcp\\py313\\python.exe -m lab_agent.mcp_server --write-launcher
+
+LORE's listener can stay on the Store Python; only the SSH-started server cannot.
+"""
+
+
 def write_launcher(pubkey_path: str | None = None) -> int:
     """Write the launcher the MCP-only SSH key's forced command runs, and print the key line."""
     py = sys.executable
+    if _is_store_python():
+        print(_STORE_PYTHON_REFUSAL)
+        return 1
     if os.name == "nt":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
         target = base / "lore_mcp" / "lore_mcp.cmd"

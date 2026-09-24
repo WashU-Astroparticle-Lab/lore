@@ -43,7 +43,7 @@ git pull
 The environment LORE runs in may also run the lab's Presto code. Look before installing:
 
 ```bash
-PYTHON -m pip install --dry-run "mcp>=1.26" python-dotenv
+PYTHON -m pip install --dry-run "mcp>=1.26,<2" python-dotenv
 ```
 
 Read the "Would install" line. If it would change the version of anything the
@@ -51,7 +51,7 @@ measurement code uses (numpy, scipy, the presto package, pydantic if your code u
 **stop and use the separate environment below.** If it only adds new packages, install:
 
 ```bash
-PYTHON -m pip install "mcp>=1.26" python-dotenv
+PYTHON -m pip install "mcp>=1.26,<2" python-dotenv
 ```
 
 <details><summary>Separate environment instead (nothing shared with the lab's code)</summary>
@@ -61,12 +61,30 @@ The server needs only the MCP library and python-dotenv, not LORE's heavy packag
 ```bash
 conda create -n lore-mcp python=3.11 -y
 conda activate lore-mcp
-pip install "mcp>=1.26" python-dotenv
+pip install "mcp>=1.26,<2" python-dotenv
 ```
 
 Then use this environment's python wherever these steps say `PYTHON` for the MCP server
 (steps 4 and 6). The listener keeps running in LORE's usual environment.
 </details>
+
+**If `PYTHON` is the Microsoft Store Python** (its path contains `WindowsApps`), the MCP
+server cannot use it, and `--write-launcher` refuses it. Under an SSH logon Windows often
+refuses to start a Store app ("Unable to create process ... Access is denied"), and the
+Store Python silently redirects writes under `AppData\Local` into its own package folder,
+where sshd cannot see the launcher. A venv made from it inherits both problems. Use a
+python.org Python for the server: the NuGet package needs no installer and no admin.
+
+```powershell
+Invoke-WebRequest https://api.nuget.org/v3-flatcontainer/python/3.13.15/python.3.13.15.nupkg -OutFile py.zip
+Expand-Archive py.zip py_pkg; Move-Item py_pkg\tools C:\lore_mcp\py313; Remove-Item py.zip, py_pkg -Recurse
+C:\lore_mcp\py313\python.exe -m pip install "mcp>=1.26,<2" python-dotenv
+```
+
+Then `C:\lore_mcp\py313\python.exe` is `PYTHON` for steps 4 and 6. The listener can stay on
+the Store Python. The same redirection applies to anything else the listener writes under
+`AppData\Local`, so keep `KB_STORAGE_DIR` out of it too (e.g. `C:/lore_kb`): otherwise the
+listener's nightly refresh updates a private copy and the server keeps reading the old one.
 
 ### 3. Move the nightly refresh out of the night
 
@@ -241,6 +259,45 @@ In that session, `/mcp` should show `lore` as connected. Then try:
 The second should go `resolve` → `read_page`, and find `20260702_JPL_QPDs`.
 `ServerAliveInterval` keeps an idle connection from being dropped during a long night.
 
+### Other MCP clients (Cursor, the OpenAI Agents SDK, Codex)
+
+Nothing on the lab machine changes; the agent's client just runs the same `ssh` command.
+Two things to carry over from step 12:
+
+- **Set `PROGRAMDATA` in the server's environment.** Windows' `ssh.exe` exits 255 without
+  printing anything when `PROGRAMDATA` is missing, and some clients start servers with a
+  stripped-down environment (the MCP Python SDK's default does, which the OpenAI Agents
+  SDK uses). The only symptom is "connection closed".
+- **A login name with a space** (e.g. a Windows account `lc control`) goes in `-l`, as its
+  own argument, rather than in `user@host`.
+
+Cursor, in `%USERPROFILE%\.cursor\mcp.json` on the agent's machine:
+
+```json
+{
+  "mcpServers": {
+    "lore": {
+      "command": "C:\\Windows\\System32\\OpenSSH\\ssh.exe",
+      "args": [
+        "-i", "C:\\Users\\<you>\\.ssh\\lore_mcp",
+        "-l", "LABUSER",
+        "-T",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "ServerAliveInterval=30",
+        "LABHOST"
+      ],
+      "env": { "PROGRAMDATA": "C:\\ProgramData" }
+    }
+  }
+}
+```
+
+Before opening the client, run the same command by hand from the agent's machine. If it
+connects and then sits silently, that is LORE's server waiting for MCP messages: it works,
+and Ctrl+C ends it. On the lab machine, `Get-WinEvent -LogName OpenSSH/Operational
+-MaxEvents 10` (no admin needed) shows each `Accepted publickey` with the key's fingerprint.
+
 ---
 
 ## When something fails
@@ -255,6 +312,10 @@ The second should go `resolve` → `read_page`, and find `20260702_JPL_QPDs`.
 | `The system cannot find the path specified` | launcher path | Re-run `--write-launcher` on the lab machine; copy its line exactly |
 | `status` works but `graph_service: not responding` | listener | Start the listener on the lab machine. The other tools do not need it |
 | `/mcp` shows lore as failed, but step 11 passed | Claude Code config | `claude mcp get lore` to check the command matches step 11 exactly |
+| `TCP connect ... failed` from the agent's machine, although it works on the lab machine | campus network | The two machines are on networks that cannot reach each other (e.g. different Wi-Fi networks). Put both on the same one, or use a wired link |
+| `Unable to create process using "...python.exe" ... Access is denied` | launcher's Python | It is the Microsoft Store Python, or a venv made from it. Use a python.org Python (step 2) |
+| Connection closes at once, ssh prints nothing, exit code 255 | client environment | `PROGRAMDATA` is not set for `ssh.exe`. Add it to the server's `env` in the client's config |
+| `No module named 'mcp.server.fastmcp'` in the server's stderr | MCP library version | mcp 2.x is installed; `pip install "mcp>=1.26,<2"` |
 
 For more detail from the server side, set `LogLevel DEBUG3` in
 `C:\ProgramData\ssh\sshd_config`, restart sshd, and read
