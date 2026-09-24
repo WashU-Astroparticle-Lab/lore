@@ -104,3 +104,9 @@ Only then hand it back to the lab.
 `main` before this release is `8fa677a`. `git checkout 8fa677a` on the lab
 machine restores the previous behaviour; the KB and corpus are unaffected because
 they live outside the repo.
+
+## Optional: let another agent query LORE
+
+To give a second Claude Code session, such as a measurement agent on the DAQ machine,
+read-only access to LORE's knowledge over SSH, follow `docs/mcp_ssh_setup.md` after the
+steps above. It adds no listening port and changes nothing about how LORE itself runs.

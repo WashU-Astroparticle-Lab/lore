@@ -33,6 +33,10 @@ browser-cookies = ["browser-cookie3"]
 # pipeline and the keyword-search fallback work without it. The build LLM is the
 # Claude Code plan via headless `claude -p` (no API SDK needed).
 rag = ["lightrag-hku", "sentence-transformers"]
+# Read-only MCP server so another agent (e.g. on the DAQ machine) can query LORE.
+# Needs only the MCP SDK and python-dotenv, so it can also live in its own small env.
+# See docs/mcp_ssh_setup.md.
+mcp = ["mcp>=1.26", "python-dotenv"]
 
 [tool.setuptools.packages.find]
 include = ["lab_agent*"]
