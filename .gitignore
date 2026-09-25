@@ -78,3 +78,6 @@ tests/golden/
 eval/qa_cases.jsonl
 docs/live_test_plan.md
 docs/ux_roadmap.md
+
+# Notes a measurement agent queued through the MCP server, awaiting or after upload.
+agent_inbox/

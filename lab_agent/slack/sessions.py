@@ -196,6 +196,24 @@ def reap_finished() -> None:
     _drain_retries()
 
 
+def agent_notes_loop(interval_s: int = 30) -> None:
+    """Publish notes the measurement agent queued through LORE's MCP server.
+
+    The server holds no credentials, so it only queues (lab_agent.agent_inbox); this
+    listener has the LabArchives keys and uploads them as unreviewed agent notes. A
+    failure here is logged and retried; it never takes the listener down.
+    """
+    from ..publish.agent_notes import process_inbox
+
+    while True:
+        try:
+            for line in process_inbox():
+                print(f"[agent-notes] {line}", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[agent-notes] inbox pass failed: {exc}", flush=True)
+        time.sleep(interval_s)
+
+
 def reaper_loop() -> None:
     while True:
         time.sleep(30)
