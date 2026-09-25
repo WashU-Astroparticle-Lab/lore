@@ -30,12 +30,12 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from ..config import PROJECT_ROOT
 from . import api
 from .sessions import (
-    KG_REFRESH_HOUR,
     MAX_CONCURRENT,
     MAX_PER_USER,
     SESSION_TIMEOUT,
     is_ack,
     is_pipeline_request,
+    kg_refresh_hour,
     kg_refresh_loop,
     reaper_loop,
     spawn_claude,
@@ -103,8 +103,9 @@ def main() -> None:
     print(f"[slack-listener] Session timeout: {SESSION_TIMEOUT // 60} min  "
           f"Max concurrent: {MAX_CONCURRENT}  Per-user cap: {MAX_PER_USER}", flush=True)
     threading.Thread(target=reaper_loop, daemon=True).start()
-    threading.Thread(target=kg_refresh_loop, daemon=True).start()
-    print(f"[slack-listener] Nightly KG refresh scheduled for {KG_REFRESH_HOUR:02d}:00 "
+    refresh_hour = kg_refresh_hour()
+    threading.Thread(target=kg_refresh_loop, args=(refresh_hour,), daemon=True).start()
+    print(f"[slack-listener] Nightly KG refresh scheduled for {refresh_hour:02d}:00 "
           "(local); Task Scheduler job kept as fallback, build lock prevents overlap.", flush=True)
     # Host the warm knowledge-graph query service so Slack Q&A skips the ~25-40s cold start
     # per question. It loads the graph once in its own thread; query_kb falls back to a cold
