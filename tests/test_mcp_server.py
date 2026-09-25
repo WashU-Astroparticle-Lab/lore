@@ -322,6 +322,61 @@ def test_dr_status_says_when_it_cannot_be_trusted():
             os.environ["DR_DATA_PATH"] = saved
 
 
+@contextlib.contextmanager
+def _call_log(path: Path, ssh_client: str | None = "10.232.129.236 50000 22"):
+    saved = {k: os.environ.get(k) for k in ("LORE_MCP_LOG", "SSH_CLIENT")}
+    os.environ["LORE_MCP_LOG"] = str(path)
+    if ssh_client is None:
+        os.environ.pop("SSH_CLIENT", None)
+    else:
+        os.environ["SSH_CLIENT"] = ssh_client
+    try:
+        yield path
+    finally:
+        for k, v in saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_every_tool_call_is_logged_on_lores_side():
+    import json
+
+    import anyio
+
+    from lab_agent.mcp_server import server
+
+    with tempfile.TemporaryDirectory() as tmp, _call_log(Path(tmp) / "calls.jsonl") as log:
+        with _corpus({"20260702_JPL_QPDs": "BE260416 chip, LED pulse at 99 mA"}):
+            anyio.run(lambda: server.resolve("BE260416"))
+            anyio.run(lambda: server.search("LED pulse", 3, "notebook"))
+        entries = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()]
+    assert [e["tool"] for e in entries] == ["resolve", "search"], entries
+    s = entries[1]
+    assert s["args"] == {"query": "LED pulse", "k": 3, "scope": "notebook"}, s["args"]
+    assert s["caller"] == "10.232.129.236", "the calling machine must be recorded"
+    assert s["result"]["results"][0]["source"] == "la_page:20260702_JPL_QPDs", (
+        "the log must hold what the agent was actually told")
+    assert entries[0]["session"] == s["session"] and "at" in s and "seconds" in s
+
+
+def test_a_logging_failure_never_costs_the_agent_its_answer():
+    import anyio
+
+    from lab_agent.mcp_server import server
+
+    with tempfile.TemporaryDirectory() as tmp:
+        blocker = Path(tmp) / "not_a_dir"
+        blocker.write_text("x", encoding="utf-8")
+        err = io.StringIO()
+        with _call_log(blocker / "calls.jsonl"), _corpus({"p": "some text"}), \
+                contextlib.redirect_stderr(err):
+            out = anyio.run(lambda: server.read_page("p"))
+    assert out["found"] is True, out
+    assert "could not write the call log" in err.getvalue(), err.getvalue()
+
+
 def test_tools_never_write_to_stdout():
     @core._quiet
     def noisy():
@@ -352,9 +407,14 @@ def test_end_to_end_over_stdio():
     """Spawn the real server and hold a real MCP session with it, as SSH will."""
     from lab_agent.mcp_server.ops import handshake
 
-    hs = handshake([sys.executable, "-m", "lab_agent.mcp_server"], cwd=PROJECT_ROOT,
-                   env_extra={"KB_SERVICE_PORT": str(_closed_port())}, timeout=120)
+    with tempfile.TemporaryDirectory() as tmp:
+        log = Path(tmp) / "calls.jsonl"
+        hs = handshake([sys.executable, "-m", "lab_agent.mcp_server"], cwd=PROJECT_ROOT,
+                       env_extra={"KB_SERVICE_PORT": str(_closed_port()),
+                                  "LORE_MCP_LOG": str(log)}, timeout=120)
+        logged = log.read_text(encoding="utf-8") if log.exists() else ""
     assert hs["ok"], f"handshake failed: {hs['error']}"
+    assert '"tool": "status"' in logged, "the real server did not log the status call"
     assert set(hs["tools"]) == EXPECTED_TOOLS, hs["tools"]
     assert hs["has_instructions"], "the server's instructions did not reach the client"
     assert hs["status"] and "notebook_pages" in hs["status"], hs["status"]

@@ -98,7 +98,10 @@ KB_REFRESH_HOUR=12
 The refresh defaults to 2 a.m., which would land mid-run and pause graph answers for
 about 40 s while the graph reloads. At noon, a person is around if it fails.
 
-Now restart the listener, so it picks this up and the graph service is running.
+Now restart the listener, so it picks this up and the graph service is running. Its
+startup line should read `Nightly KG refresh scheduled for 12:00`. (Before the fix of
+2026-09-25 the listener read this setting before loading `.env`, so it was ignored and
+the refresh ran at 2 a.m. whatever it said; if the line says `02:00`, pull.)
 
 ### 4. Check it works on this machine
 
@@ -298,6 +301,37 @@ Before opening the client, run the same command by hand from the agent's machine
 connects and then sits silently, that is LORE's server waiting for MCP messages: it works,
 and Ctrl+C ends it. On the lab machine, `Get-WinEvent -LogName OpenSSH/Operational
 -MaxEvents 10` (no admin needed) shows each `Accepted publickey` with the key's fingerprint.
+
+### What the agent asked
+
+Every tool call is appended to `session_logs\mcp_calls.jsonl` on LORE's machine
+(gitignored; set `LORE_MCP_LOG` to put it elsewhere): the time, the tool, its arguments,
+the calling machine's address, how long it took, and the full result the agent received.
+Calls from one SSH connection share a `session` id. It is the only file the server
+writes, and a failure to write it never fails the call. To read a night's questions:
+
+```powershell
+Get-Content session_logs\mcp_calls.jsonl | ConvertFrom-Json |
+  Select-Object at, caller, tool, @{n='args'; e={$_.args | ConvertTo-Json -Compress}}
+```
+
+### Getting the agent's notes back to LORE
+
+The MCP key cannot write to LORE's machine, on purpose. The agent's notes come back
+through the repository it already works in instead:
+
+1. The agent writes its notes as markdown in an `Agent/` folder inside the run folder
+   (e.g. `analysis_archive/DAQ/PRIMA_JKID_JPLQPD_20260831/Agent/`), or names them
+   `agent*.md`, and commits and pushes them with the run's data and notebooks.
+2. A report on that run (a Slack request with the GitHub folder URL) writes every notes
+   file in the folder to `repo_notes.md`, headed by who wrote it. Files under `Agent/`
+   or named `agent*` are labelled as written by an AI measurement agent and unreviewed.
+3. The GitHub analyst reads them for where to look, never as the source of a value, the
+   same rule LORE applies to its own `[UNSIGNED]` drafts.
+
+Put the convention in the agent's own instructions (its `.cursor/rules` or `CLAUDE.md`),
+e.g. *"Write your run notes as markdown in the run's `Agent/` folder, commit and push
+them with the data. Say which values you measured and which you inferred."*
 
 ---
 

@@ -7,13 +7,14 @@ what the calling model reads when deciding which tool to use, so they are writte
 """
 from __future__ import annotations
 
+import time
 from typing import Annotated, Literal
 
 import anyio
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
-from . import core
+from . import calllog, core
 
 INSTRUCTIONS = """\
 LORE is this laboratory's knowledge source: its electronic-notebook pages, crawled and
@@ -51,12 +52,25 @@ is easy to attribute later, and quote the source when you rely on a result.
 mcp = FastMCP("lore", instructions=INSTRUCTIONS, log_level="WARNING")
 
 
+async def _call(tool: str, fn, **args):
+    """Run a core tool off the event loop and record the call in LORE's call log."""
+    started = time.monotonic()
+    try:
+        result = await anyio.to_thread.run_sync(lambda: fn(**args))
+    except Exception as exc:
+        calllog.record(tool, args, error=f"{type(exc).__name__}: {exc}",
+                       seconds=time.monotonic() - started)
+        raise
+    calllog.record(tool, args, result, seconds=time.monotonic() - started)
+    return result
+
+
 @mcp.tool()
 async def status() -> dict:
     """What LORE knows and how fresh it is: number of notebook pages, when they were last
     crawled, whether the graph service is up, and known blind spots. Cheap. A good first
     call in a session, and the thing to check if another tool says a service is down."""
-    return await anyio.to_thread.run_sync(core.status)
+    return await _call("status", core.status)
 
 
 @mcp.tool()
@@ -70,7 +84,7 @@ async def resolve(
     anything else when a question names a specific chip, device, run or sample: the
     knowledge graph often cannot see bare IDs, especially ones that only appear inside a
     linked file name. Instant and free."""
-    return await anyio.to_thread.run_sync(core.resolve, identifier, k)
+    return await _call("resolve", core.resolve, identifier=identifier, k=k)
 
 
 @mcp.tool()
@@ -82,7 +96,7 @@ async def read_page(
     """Return one notebook page verbatim, as last crawled. Better than ask_graph() for
     anything about a single page. If the name is ambiguous, returns candidate page ids to
     choose from instead. Instant and free."""
-    return await anyio.to_thread.run_sync(core.read_page, page)
+    return await _call("read_page", core.read_page, page=page)
 
 
 @mcp.tool()
@@ -99,7 +113,7 @@ async def search(
     best-matching lines with their source. The main tool for "have we seen this before?".
     Use scope='notebook' to hear only from people's own notes. LORE's unreviewed draft
     reports are always excluded. Instant and free."""
-    return await anyio.to_thread.run_sync(core.search, query, k, scope)
+    return await _call("search", core.search, query=query, k=k, scope=scope)
 
 
 @mcp.tool()
@@ -112,7 +126,7 @@ async def ask_graph(
     spends LORE's model budget, so prefer resolve(), read_page() and search() first. The
     answer is written by a model: confirm key numbers with read_page(). Also returns
     candidate pages from an exact-identifier and keyword pass the graph can miss."""
-    return await anyio.to_thread.run_sync(core.ask_graph, question)
+    return await _call("ask_graph", core.ask_graph, question=question)
 
 
 @mcp.tool()
@@ -126,7 +140,7 @@ async def dr_status(
     and min / median / max over the window, all in mK. Warns if the log has stopped
     updating. Thermometry only; no pressures. Read-only and advisory: the fridge's own
     controls and alarms are authoritative. Instant and free."""
-    return await anyio.to_thread.run_sync(core.dr_status, hours)
+    return await _call("dr_status", core.dr_status, hours=hours)
 
 
 def run() -> None:
