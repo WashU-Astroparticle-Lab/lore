@@ -33,6 +33,7 @@ from .sessions import (
     MAX_CONCURRENT,
     MAX_PER_USER,
     SESSION_TIMEOUT,
+    agent_notes_loop,
     is_ack,
     is_pipeline_request,
     kg_refresh_hour,
@@ -103,6 +104,9 @@ def main() -> None:
     print(f"[slack-listener] Session timeout: {SESSION_TIMEOUT // 60} min  "
           f"Max concurrent: {MAX_CONCURRENT}  Per-user cap: {MAX_PER_USER}", flush=True)
     threading.Thread(target=reaper_loop, daemon=True).start()
+    threading.Thread(target=agent_notes_loop, daemon=True).start()
+    print("[slack-listener] Publishing measurement-agent notes from the MCP inbox "
+          "to LabArchives every 30 s.", flush=True)
     refresh_hour = kg_refresh_hour()
     threading.Thread(target=kg_refresh_loop, args=(refresh_hour,), daemon=True).start()
     print(f"[slack-listener] Nightly KG refresh scheduled for {refresh_hour:02d}:00 "
