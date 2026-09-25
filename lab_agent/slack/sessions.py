@@ -16,7 +16,7 @@ import time
 import uuid
 from pathlib import Path
 
-from ..config import PROJECT_ROOT
+from ..config import PROJECT_ROOT, load_env
 from . import api
 from .history import fetch_history
 
@@ -211,7 +211,31 @@ def reaper_loop() -> None:
 # job (LORE-KG-nightly) is kept as a fallback; the cross-process build lock in
 # lab_agent.rag.build_lock ensures the two never build at the same time.
 
-KG_REFRESH_HOUR = int(os.environ.get("KB_REFRESH_HOUR", "2"))  # local hour, 0–23
+DEFAULT_KG_REFRESH_HOUR = 2
+
+
+def kg_refresh_hour() -> int:
+    """The local hour (0-23) for the nightly refresh: KB_REFRESH_HOUR from .env, else 2.
+
+    Read when the refresh loop starts, after loading .env. It used to be a module
+    constant, evaluated at import, before anything had loaded .env: the listener only
+    loads it on first asking for a Slack token. So KB_REFRESH_HOUR in .env was silently
+    ignored and the refresh always ran at 2 a.m., in the middle of an overnight
+    measurement that had set it to noon precisely to avoid that.
+    """
+    load_env()
+    raw = os.environ.get("KB_REFRESH_HOUR", "").strip()
+    if not raw:
+        return DEFAULT_KG_REFRESH_HOUR
+    try:
+        hour = int(raw)
+    except ValueError:
+        hour = -1
+    if not 0 <= hour <= 23:
+        print(f"[kg-refresh] KB_REFRESH_HOUR={raw!r} is not an hour 0-23; using "
+              f"{DEFAULT_KG_REFRESH_HOUR:02d}:00.", flush=True)
+        return DEFAULT_KG_REFRESH_HOUR
+    return hour
 
 
 def _run_kg_refresh() -> None:
@@ -249,19 +273,24 @@ def _run_kg_refresh() -> None:
             print(f"[kg-refresh] reload signal failed: {exc}", flush=True)
 
 
-def kg_refresh_loop() -> None:
-    """Fire an incremental KG refresh once per day at KG_REFRESH_HOUR (local time).
+def kg_refresh_loop(hour: int | None = None) -> None:
+    """Fire an incremental KG refresh once per day at ``hour`` (local time).
+
+    ``hour`` defaults to ``kg_refresh_hour()``; the listener passes the value it
+    announces at startup, so the log and the schedule cannot disagree.
 
     Checks every 5 minutes; runs at most once per calendar day. A failed refresh
     is logged and retried the next day — it never takes the listener down. The
     build lock makes a same-day double-run (e.g. after a listener restart, or the
     Task Scheduler fallback firing too) safe and near-free.
     """
+    if hour is None:
+        hour = kg_refresh_hour()
     last_run_date: tuple[int, int, int] | None = None
     while True:
         now = time.localtime()
         today = (now.tm_year, now.tm_mon, now.tm_mday)
-        if now.tm_hour == KG_REFRESH_HOUR and today != last_run_date:
+        if now.tm_hour == hour and today != last_run_date:
             last_run_date = today
             print("[kg-refresh] nightly window reached — starting incremental build", flush=True)
             try:
