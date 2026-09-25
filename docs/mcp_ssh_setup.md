@@ -13,9 +13,13 @@ Claude Code ── ssh (key can only start LORE's tools) ──► lore_mcp.cmd
 ```
 
 **What it can do:** `status`, `resolve`, `read_page`, `search`, `ask_graph`, and `dr_status`
-(the fridge's thermometry, read from its own log; needs `DR_DATA_PATH` in `.env`). All read-only.
-**What it cannot do:** write, upload, post to Slack, fetch from LabArchives, rebuild the
-graph, or read any credential. `tests/test_mcp_server.py` enforces all of that.
+(the fridge's thermometry, read from its own log; needs `DR_DATA_PATH` in `.env`), all
+read-only; and `publish_notes` / `notes_status`, which file the agent's own notes as a new,
+unreviewed page in the AI Agent folder (see "The agent's notes" below).
+**What it cannot do:** edit or add to any existing page, upload anything else, post to
+Slack, fetch from LabArchives, rebuild the graph, or read any credential. The server itself
+never uploads: it queues notes, and LORE's listener publishes them.
+`tests/test_mcp_server.py` enforces all of that.
 
 Throughout, `PYTHON` means the `PYTHON` value in `lab_config.md` on that machine,
 `LABUSER@LABHOST` means the lab machine's login and address (step 5), and `LORE\` means
@@ -238,7 +242,7 @@ your laptop is a different install without LORE's packages):
 C:\Users\axelr\miniconda3\python.exe -m lab_agent.mcp_server --probe ssh -i C:/Users/axelr/.ssh/lore_mcp -T -o BatchMode=yes -o StrictHostKeyChecking=accept-new LABUSER@LABHOST
 ```
 
-Expected: **OK: server 'lore' answered**, with the six tools and the page count. **This
+Expected: **OK: server 'lore' answered**, with the eight tools and the page count. **This
 proves the forced command, the launcher and the protocol all work through SSH**, using the
 exact exchange Claude Code will perform.
 
@@ -315,23 +319,39 @@ Get-Content session_logs\mcp_calls.jsonl | ConvertFrom-Json |
   Select-Object at, caller, tool, @{n='args'; e={$_.args | ConvertTo-Json -Compress}}
 ```
 
-### Getting the agent's notes back to LORE
+### The agent's notes
 
-The MCP key cannot write to LORE's machine, on purpose. The agent's notes come back
-through the repository it already works in instead:
+Two ways back, and the agent should use both at the end of a run:
 
-1. The agent writes its notes as markdown in an `Agent/` folder inside the run folder
-   (e.g. `analysis_archive/DAQ/PRIMA_JKID_JPLQPD_20260831/Agent/`), or names them
-   `agent*.md`, and commits and pushes them with the run's data and notebooks.
-2. A report on that run (a Slack request with the GitHub folder URL) writes every notes
-   file in the folder to `repo_notes.md`, headed by who wrote it. Files under `Agent/`
-   or named `agent*` are labelled as written by an AI measurement agent and unreviewed.
-3. The GitHub analyst reads them for where to look, never as the source of a value, the
-   same rule LORE applies to its own `[UNSIGNED]` drafts.
+**Into the notebook, directly: `publish_notes(title, markdown, run)`.** The server writes
+the note to `agent_inbox\pending\` on LORE's machine (gitignored; `LORE_AGENT_INBOX`
+overrides). The Slack listener, which holds the LabArchives keys, checks that inbox every
+30 s and creates a **new page in the AI Agent folder** titled
+`[UNSIGNED] Agent notes <date time> — <title>`, headed by a banner saying the measurement
+agent wrote it from which machine and that nobody reviewed it, with the markdown attached.
+The agent calls `notes_status(note_id)` to confirm the page landed.
+
+- It only ever creates new pages, only in the upload folder. Raw HTML in the notes is shown
+  as text. Resubmitting the same notes does not make a second page. At most 20 notes wait
+  at once, and a note over 200,000 characters is refused.
+- It needs the **listener running**. If it is down, notes wait in `pending\` and are
+  published when it is back; `notes_status` says so.
+- A failed upload is retried after 2, 4, 8 and 16 minutes, then moved to
+  `agent_inbox\failed\` with the error, which `notes_status` reports.
+- The listener window logs each one as `[agent-notes] note-… published: <page title>`.
+
+**Into the repository, with the data.** The agent also commits the notes to an `Agent/`
+folder inside the run folder (e.g. `analysis_archive/DAQ/PRIMA_JKID_JPLQPD_20260831/Agent/`)
+or names them `agent*.md`. A later LORE report on that run writes every notes file in the
+folder to `repo_notes.md`, headed by who wrote it; the GitHub analyst uses agent notes for
+where to look, never as the source of a value, the rule LORE applies to its own
+`[UNSIGNED]` drafts.
 
 Put the convention in the agent's own instructions (its `.cursor/rules` or `CLAUDE.md`),
-e.g. *"Write your run notes as markdown in the run's `Agent/` folder, commit and push
-them with the data. Say which values you measured and which you inferred."*
+e.g. *"At the end of a run, or a phase of one, write your notes as markdown: say which
+values you measured and which you inferred or read from LORE. File them with LORE's
+publish_notes and confirm with notes_status, and commit the same file to the run's
+`Agent/` folder with the data."*
 
 ---
 

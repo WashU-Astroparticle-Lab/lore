@@ -23,7 +23,8 @@ import lab_agent.cli.ask as ask
 from lab_agent.config import PROJECT_ROOT
 from lab_agent.mcp_server import core
 
-EXPECTED_TOOLS = {"status", "resolve", "read_page", "search", "ask_graph", "dr_status"}
+EXPECTED_TOOLS = {"status", "resolve", "read_page", "search", "ask_graph", "dr_status",
+                  "publish_notes", "notes_status"}
 
 # Modules that can write to the notebook, post to Slack, fetch with credentials, run the
 # report pipeline or rebuild the graph. The server must never pull any of them in.
@@ -375,6 +376,32 @@ def test_a_logging_failure_never_costs_the_agent_its_answer():
             out = anyio.run(lambda: server.read_page("p"))
     assert out["found"] is True, out
     assert "could not write the call log" in err.getvalue(), err.getvalue()
+
+
+def test_publish_notes_only_queues_and_status_reports_it():
+    saved = {k: os.environ.get(k) for k in ("LORE_AGENT_INBOX", "SSH_CLIENT")}
+    with tempfile.TemporaryDirectory() as tmp:
+        os.environ["LORE_AGENT_INBOX"] = tmp
+        os.environ["SSH_CLIENT"] = "10.232.129.236 50000 22"
+        try:
+            notes = "# Night 1\nQi measured."
+            r = core.publish_notes("night 1", notes, run="PRIMA_20260831")
+            assert r["queued"] and r["state"] == "pending", r
+            assert (Path(tmp) / "pending" / f"{r['note_id']}.md").exists()
+            st = core.notes_status(r["note_id"])
+            assert st["found"] and st["state"] == "pending" and "listener" in st["note"], st
+            assert core.publish_notes("night 1", notes)["queued"] is False, "a retry re-queued"
+            assert core.publish_notes("", "x")["queued"] is False
+            assert core.notes_status("note-000000000000")["found"] is False
+            assert core.notes_status()["recent"][0]["id"] == r["note_id"]
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+    # Queuing must not have pulled in anything that uploads.
+    test_nothing_that_can_act_is_imported()
 
 
 def test_tools_never_write_to_stdout():

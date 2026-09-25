@@ -3,9 +3,13 @@
 An agent on another machine calls these while it drives hardware overnight, so three
 properties are structural here rather than policy:
 
-* **Read-only.** Nothing in this package writes, uploads, posts to Slack, fetches from
-  LabArchives with cookies, or rebuilds the graph. ``tests/test_mcp_server.py`` fails
-  if any module that can do those things gets imported.
+* **Read-only, with one queue.** Nothing in this package uploads, posts to Slack,
+  fetches from LabArchives with cookies, or rebuilds the graph, and
+  ``tests/test_mcp_server.py`` fails if any module that can do those things gets
+  imported. The one write the agent can cause is ``publish_notes``, which drops its
+  notes into ``agent_inbox`` on LORE's machine; LORE's listener, not this process,
+  uploads them, only ever as a new, unreviewed page in the AI Agent folder. (The call
+  log, ``calllog.py``, is the server's other write, to its own file.)
 * **No credentials.** Only a whitelist of non-secret knowledge-base settings is read
   from ``.env``. This process never holds a GitHub token, LabArchives key or Slack token.
 * **Never prints.** Over the stdio transport, stdout *is* the protocol channel, and a
@@ -338,6 +342,63 @@ def dr_status(hours: float = 2.0, now: datetime | None = None) -> dict:
                  "come from the log header. The fridge's controls and alarms are "
                  "authoritative, not this. Labels with [MC] are on the mixing chamber."),
     }
+
+
+@_quiet
+def publish_notes(title: str, markdown: str, run: str = "") -> dict:
+    """Queue the agent's notes for a new page in LabArchives' AI Agent folder.
+
+    This server cannot upload: it holds no credentials. It writes the note to the
+    inbox on LORE's machine and LORE's listener publishes it within about a minute.
+    """
+    from .. import agent_inbox
+    from .calllog import caller
+
+    record = agent_inbox.submit(title, markdown, run=run, caller=caller())
+    if "error" in record:
+        return {"queued": False, "note": record["error"]}
+    state = record.get("state")
+    return {
+        "queued": state == "pending" and not record.get("duplicate"),
+        "note_id": record["id"],
+        "state": state,
+        "page_title_will_be": record.get("page_title") or
+                              f"[UNSIGNED] Agent notes {record['submitted_at'][:16].replace('T', ' ')}"
+                              f" — {record['title']}",
+        "note": ("Already submitted: these exact notes were sent before, so nothing new was "
+                 "queued." if record.get("duplicate") else
+                 "Queued. LORE's listener publishes it as a new page in the AI Agent folder "
+                 "within about a minute, marked as unreviewed agent notes. Call "
+                 "notes_status(note_id) to confirm it landed."),
+    }
+
+
+@_quiet
+def notes_status(note_id: str = "") -> dict:
+    """Where a submitted note is: pending, published (and where), or failed (and why)."""
+    from .. import agent_inbox
+
+    def view(r: dict) -> dict:
+        keep = ("id", "state", "title", "run", "submitted_at", "attempts", "last_error",
+                "published_at", "page_title", "folder", "notebook", "notebook_url")
+        return {k: r[k] for k in keep if r.get(k) not in (None, "")}
+
+    if note_id:
+        record = agent_inbox.read(note_id.strip())
+        if record is None:
+            return {"found": False, "note": f"No note with id {note_id!r}."}
+        out = {"found": True, **view(record)}
+        if record["state"] == "pending":
+            out["note"] = ("Waiting for LORE's listener to upload it. If it stays pending for "
+                           "more than a few minutes the listener may be down; the note is kept "
+                           "and will be published when it is back.")
+        elif record["state"] == "failed":
+            out["note"] = "LORE gave up publishing this note; last_error says why. Tell a person."
+        else:
+            out["note"] = ("Published. There is no per-page link: open the notebook and find "
+                           "the page by its title in the folder named.")
+        return out
+    return {"recent": [view(r) for r in agent_inbox.recent(10)]}
 
 
 @_quiet
