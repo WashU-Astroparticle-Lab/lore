@@ -57,16 +57,69 @@ _PRIMARY_NOTEBOOK_STEMS = {
 # Per-file classification
 # ---------------------------------------------------------------------------
 
+# Notes an AI measurement agent wrote while running an experiment, e.g. the DAQ PC's
+# agent working in <run>/Agent/. Like LORE's own [UNSIGNED] drafts they are not the
+# lab's record: useful for where to look, never the source of a value.
+AGENT_NOTES_DESCRIPTION = "Notes written by an AI measurement agent (unreviewed; leads, not evidence)"
+HUMAN_NOTES_DESCRIPTION = "Notes / documentation"
+_AGENT_FOLDERS = {"agent", "agents"}
+
+
+def is_agent_notes(path: str) -> bool:
+    """Whether a notes file was written by a measurement agent, going by where it lives:
+    under an ``Agent/`` (or ``agents/``) folder, or named ``agent*``."""
+    p = PurePosixPath(path)
+    if p.suffix.lower() not in _NOTES_EXT:
+        return False
+    return (any(part.lower() in _AGENT_FOLDERS for part in p.parts[:-1])
+            or p.name.lower().startswith("agent"))
+
+
+REPO_NOTE_CHAR_LIMIT = 30_000   # per file; an agent's run log can be long
+
+
+def format_repo_notes(artifacts) -> str | None:
+    """The repository's notes files, verbatim, each headed by who wrote it.
+
+    ``artifacts`` are collected artifacts; only GitHub notes with content are used.
+    Returns None when there are none. People's notes come first.
+    """
+    notes = [a for a in artifacts
+             if getattr(a, "source", "") == "github" and a.kind == "notes"
+             and a.exists and a.content]
+    if not notes:
+        return None
+    notes.sort(key=lambda a: (is_agent_notes(a.path), a.path))
+    sections = []
+    for a in notes:
+        by = ("**Written by an AI measurement agent, unreviewed.** Use it to find where to "
+              "look (what was run, when, which files), never as the source of a value or "
+              "conclusion. Confirm anything that matters in the data, code or lab notebook."
+              if is_agent_notes(a.path) else
+              "Written by people (repository notes).")
+        text = a.content
+        if len(text) > REPO_NOTE_CHAR_LIMIT:
+            text = (text[:REPO_NOTE_CHAR_LIMIT]
+                    + f"\n\n[... truncated at {REPO_NOTE_CHAR_LIMIT} of {len(a.content)} characters]")
+        sections.append(f"# {a.path}\n\n> {by}\n\n{text}")
+    return ("<!-- Notes files from the GitHub folder, verbatim. Each says who wrote it. -->\n\n"
+            + "\n\n---\n\n".join(sections))
+
+
 def classify_file(path: str) -> tuple[str, str]:
     """Classify a file path into (artifact_type, description).
 
     Returns one of: notebook | code | raw_data | processed_data |
                     notes | figure | config | unclear
 
-    Folder-name hints take priority; file extension is the fallback.
+    Folder-name hints take priority; file extension is the fallback. A measurement
+    agent's notes come first of all, so no folder hint can relabel them as people's.
     """
     p = PurePosixPath(path)
     suffix = p.suffix.lower()
+
+    if is_agent_notes(path):
+        return "notes", AGENT_NOTES_DESCRIPTION
 
     # Folder hint: walk parent parts (skip last = filename)
     for part in p.parts[:-1]:
@@ -95,7 +148,7 @@ def classify_file(path: str) -> tuple[str, str]:
     if suffix in _CODE_EXT:
         return "code", "Code file"
     if suffix in _NOTES_EXT:
-        return "notes", "Notes / documentation"
+        return "notes", HUMAN_NOTES_DESCRIPTION
     if suffix in _FIGURE_EXT:
         return "figure", "Figure or plot"
     if suffix in _PROCESSED_DATA_EXT:

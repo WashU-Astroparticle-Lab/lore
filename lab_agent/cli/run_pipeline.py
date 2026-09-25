@@ -481,6 +481,15 @@ def run(
         (out_dir / "scripts.md").write_text("\n\n---\n\n".join(sections), encoding="utf-8")
         print(f"[runner] Saved scripts.md")
 
+    # 4c. Save the repository's notes (.md/.txt). They were fetched but never written
+    # anywhere, so a README, or a measurement agent's run notes in <run>/Agent/, never
+    # reached the analysts. Each is labelled with who wrote it: agent notes are leads.
+    from ..collect.discover import format_repo_notes
+    repo_notes = format_repo_notes(bundle.collected_artifacts)
+    if repo_notes:
+        (out_dir / "repo_notes.md").write_text(repo_notes, encoding="utf-8")
+        print(f"[runner] Saved repo_notes.md")
+
     # 5. Save LabArchives notes
     if summary.labarchives_context:
         la_text = "\n\n---\n\n".join(summary.labarchives_context)
