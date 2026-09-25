@@ -106,10 +106,47 @@ def read_lcr_file(path: Path, start: datetime, end: datetime) -> dict[str, list[
     return readings
 
 
-def _median(values: list[float]) -> float:
+# A channel the bridge is not scanning keeps logging its last value. Real thermometry
+# always wanders in the last digit, so this many identical readings means a held value.
+FROZEN_MIN_SAMPLES = 100
+
+
+def is_frozen(values: list[float]) -> bool:
+    """Whether a channel logged one unchanging value: held, not measured."""
+    return len(values) >= FROZEN_MIN_SAMPLES and min(values) == max(values)
+
+
+def median(values: list[float]) -> float:
     s = sorted(values)
     n = len(s)
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
+
+
+def collect_readings(root: Path, start: datetime, end: datetime, pattern: str = LCR_GLOB,
+                     ) -> tuple[dict[str, list[tuple[datetime, float]]], list[str], list[str]]:
+    """Every labelled thermometer's (time, mK) readings in [start, end], time-sorted.
+
+    Opens only files that can hold rows in the window, merges a session's parallel
+    segments, and skips header-less stubs. Returns (readings, files read, stubs skipped).
+    """
+    merged: dict[str, list[tuple[datetime, float]]] = {}
+    files_read, stubs_skipped = [], []
+    for f in sorted(root.glob(pattern)):
+        began = _session_start(f.name)
+        if began and began > end:
+            continue
+        if _mtime(f) < start:
+            continue  # append-only: nothing written after the window began
+        chunk = read_lcr_file(f, start, end)
+        if chunk is None:
+            stubs_skipped.append(f.name)
+            continue
+        files_read.append(f.name)
+        for label, pts in chunk.items():
+            merged.setdefault(label, []).extend(pts)
+    for pts in merged.values():
+        pts.sort()
+    return merged, files_read, stubs_skipped
 
 
 def recent_thermometry(data_path: str | Path, start: datetime, end: datetime) -> dict:
@@ -124,38 +161,26 @@ def recent_thermometry(data_path: str | Path, start: datetime, end: datetime) ->
     if not root.is_dir():
         return {"found": False, "reason": f"DR data folder not found: {root}"}
 
-    merged: dict[str, list[tuple[datetime, float]]] = {}
-    files_read, stubs_skipped = [], []
-    for f in sorted(root.glob(LCR_GLOB)):
-        began = _session_start(f.name)
-        if began and began > end:
-            continue
-        if _mtime(f) < start:
-            continue  # append-only: nothing written after the window began
-        chunk = read_lcr_file(f, start, end)
-        if chunk is None:
-            stubs_skipped.append(f.name)
-            continue
-        files_read.append(f.name)
-        for label, pts in chunk.items():
-            merged.setdefault(label, []).extend(pts)
+    merged, files_read, stubs_skipped = collect_readings(root, start, end)
 
     channels = {}
     for label, pts in merged.items():
         if not pts:
             continue
-        pts.sort()
         vals = [v for _, v in pts]
         last_ts, last_v = pts[-1]
         channels[label] = {
             "latest_mK": round(last_v, 3),
             "latest_at": last_ts.isoformat(sep=" "),
             "min_mK": round(min(vals), 3),
-            "median_mK": round(_median(vals), 3),
+            "median_mK": round(median(vals), 3),
             "max_mK": round(max(vals), 3),
             "first_in_window_mK": round(pts[0][1], 3),
             "n": len(vals),
         }
+        if is_frozen(vals):
+            channels[label]["frozen"] = ("the same value in every row: most likely not being "
+                                         "scanned, so this is a held value, not a measurement")
 
     newest = max((datetime.fromisoformat(c["latest_at"]) for c in channels.values()),
                  default=None)
