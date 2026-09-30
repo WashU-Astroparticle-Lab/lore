@@ -5,6 +5,7 @@ session's final output back to Slack.
 """
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
@@ -101,6 +102,60 @@ def resumable_session(thread_key: str) -> str | None:
     return None
 
 
+# A session is told its final output is posted for it, and CLAUDE.md's Slack section
+# tells it anything the user should see must be posted and confirmed. Some sessions
+# obey the second: they post the answer with `cli.slack post`, then end with "Message
+# is confirmed in the thread. Here's the answer: ..." and the reaper posted that too.
+_DUPLICATE_RATIO = 0.6
+_ALREADY_POSTED_PREAMBLE = re.compile(
+    r"^[^\n]{0,120}\b(confirmed|posted|sent|delivered)\b[^\n]{0,120}\n+", re.IGNORECASE)
+
+
+def _normalise(text: str) -> str:
+    """Letters and digits only, so Slack's reformatting (** → *) cannot hide a match."""
+    return " ".join(re.sub(r"[^0-9a-z]+", " ", text.lower()).split())[:4000]
+
+
+def duplicates_earlier_post(body: str, earlier: list[str]) -> bool:
+    """Whether ``body`` is essentially a message the bot already posted.
+
+    A leading "confirmed / posted in the thread" line is ignored, since that is the
+    shape of the duplicate. Short outputs are never judged duplicates: too little
+    text to tell, and a missing reply is worse than a repeated one.
+    """
+    b = _normalise(_ALREADY_POSTED_PREAMBLE.sub("", body.strip(), count=1))
+    if len(b) < 60:
+        return False
+    for text in earlier:
+        e = _normalise(text)
+        if e and difflib.SequenceMatcher(None, b, e, autojunk=False).ratio() >= _DUPLICATE_RATIO:
+            return True
+    return False
+
+
+def _bot_posts_since(channel: str, thread_ts: str, since: float) -> list[str]:
+    """Texts the bot posted in the thread after ``since`` (epoch seconds)."""
+    body = api.api_get("conversations.replies", {
+        "channel": channel, "ts": thread_ts, "oldest": f"{since:.6f}", "limit": "100"})
+    return [m.get("text", "") for m in body.get("messages", [])
+            if (api.BOT_USER_ID and m.get("user") == api.BOT_USER_ID) or m.get("bot_id")]
+
+
+def _deliver_final_output(s: dict, body: str) -> None:
+    """Post a finished session's output, unless the session already posted it itself."""
+    try:
+        earlier = _bot_posts_since(s["channel"], s["thread_ts"], s["started_at"])
+    except Exception as exc:  # noqa: BLE001 — can't check: post; a repeat beats silence
+        print(f"[session-done] could not check the thread for an earlier post ({exc}); "
+              "posting the final output.", flush=True)
+        earlier = []
+    if duplicates_earlier_post(body, earlier):
+        print(f"[session-done] session={s['session_id']} already posted its answer in the "
+              "thread; not posting the final output again.", flush=True)
+        return
+    api.post_message(s["channel"], s["thread_ts"], body)
+
+
 def _reap_nolock() -> None:
     """Reap finished/timed-out sessions. Caller must hold _sessions_lock."""
     now = time.time()
@@ -131,7 +186,7 @@ def _reap_nolock() -> None:
                     lines = raw.splitlines()
                     body = "\n".join(lines[1:] if lines and lines[0].startswith("=== Session") else lines).strip()
                     if body:
-                        api.post_message(s["channel"], s["thread_ts"], body)
+                        _deliver_final_output(s, body)
             elif not s.get("timed_out"):
                 tail = read_log_tail(log_path) if log_path else ""
                 limit_keywords = ("hit your limit", "rate limit", "usage limit",

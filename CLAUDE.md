@@ -75,6 +75,13 @@ You can call the Slack API directly using the bot token. Available scopes includ
 - User asks a question that might have been discussed in a channel → search before asking them to repeat themselves
 - You need to know what was happening in the lab on a specific date → pull channel history from that day
 
+**Your reply to the person who asked is NOT sent with the CLI.** In a Slack-triggered
+session your final text output is posted to their thread automatically when you exit.
+The CLI below is for progress updates, figures, and messages to *other* channels. A
+session that also posted its answer with `slack post` made the lab read every answer
+twice: once from the CLI, once as "Message is confirmed in the thread. Here's the
+answer: …" from its final output.
+
 **How to talk to Slack — use the CLI, never `python -c`:**
 
 ```bash

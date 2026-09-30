@@ -7,6 +7,8 @@ description: Answer a knowledge/overview question about the lab's past work from
 
 This is the entry point for lab knowledge questions. Read `lab_config.md` (per CLAUDE.md) for `$PROJECT_ROOT`. Text questions are local — no cookies, no fetching. Keep replies conversational and concise — this is a Slack reply, not a report.
 
+**Deliver the answer as your final output, and only there.** It is posted to the thread for you when you exit. Do not also send it with `lab_agent.cli.slack post` — that posts it twice. (Figures you want the user to see are different: upload those with the CLI, per deduce-figure.)
+
 For two sub-capabilities this skill delegates (single source of truth — don't reinvent them here):
 - **Mapping a device/chip/run ID or a vague reference to a page + its notes → use the `find-device-notes` skill.**
 - **Reading/interpreting a specific figure/plot to get a value → use the `deduce-figure` skill.**
