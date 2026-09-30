@@ -33,9 +33,9 @@ from .sessions import (
     MAX_CONCURRENT,
     MAX_PER_USER,
     SESSION_TIMEOUT,
+    acknowledgement,
     agent_notes_loop,
     is_ack,
-    is_pipeline_request,
     kg_refresh_hour,
     kg_refresh_loop,
     reaper_loop,
@@ -61,8 +61,7 @@ def handle_mention(event, say, logger):
         logger.info(f"Ignoring acknowledgment from {user}")
         return
 
-    if is_pipeline_request(text):
-        say(text=f"<@{user}> On it — starting now...", thread_ts=thread_ts or current_ts)
+    say(text=f"<@{user}> {acknowledgement(text)}", thread_ts=thread_ts or current_ts)
 
     spawn_claude(user, text, channel, thread_ts, current_ts)
 
@@ -88,9 +87,7 @@ def handle_dm(event, say, logger):
         logger.info(f"Ignoring acknowledgment from {user}")
         return
 
-    if is_pipeline_request(text):
-        ack_thread = thread_ts or current_ts
-        api.post_message(channel, ack_thread, f"<@{user}> On it — starting now...")
+    api.post_message(channel, thread_ts or current_ts, acknowledgement(text))
 
     spawn_claude(user, text, channel, thread_ts, current_ts, is_dm=True)
 

@@ -352,6 +352,15 @@ def is_ack(text: str) -> bool:
     return len(words) <= 6 and text.strip().lower().rstrip("!.,") in ack_phrases
 
 
+def acknowledgement(text: str) -> str:
+    """What to post the moment a request arrives, so a slow answer is not mistaken for a
+    stall. A question used to get nothing until its answer, and one that took three
+    minutes was reported as "the listener has paused"."""
+    if is_pipeline_request(text):
+        return "On it — starting now..."
+    return "Looking into it — answers usually take 1–5 minutes."
+
+
 # ── Core: spawn a Claude session ──────────────────────────────────────────────
 
 def spawn_claude(
