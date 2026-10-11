@@ -152,6 +152,8 @@ def _deliver_final_output(s: dict, body: str) -> None:
     if duplicates_earlier_post(body, earlier):
         print(f"[session-done] session={s['session_id']} already posted its answer in the "
               "thread; not posting the final output again.", flush=True)
+        if s.get("progress") == "status":
+            _set_status(s, "")   # no post follows to clear it
         return
     api.post_message(s["channel"], s["thread_ts"], body)
 
@@ -249,6 +251,7 @@ def reap_finished() -> None:
     with _sessions_lock:
         _reap_nolock()
     _drain_retries()
+    _progress_tick()
 
 
 def agent_notes_loop(interval_s: int = 30) -> None:
@@ -407,13 +410,69 @@ def is_ack(text: str) -> bool:
     return len(words) <= 6 and text.strip().lower().rstrip("!.,") in ack_phrases
 
 
-def acknowledgement(text: str) -> str:
-    """What to post the moment a request arrives, so a slow answer is not mistaken for a
-    stall. A question used to get nothing until its answer, and one that took three
-    minutes was reported as "the listener has paused"."""
+def acknowledgement(text: str) -> str | None:
+    """The message to post the instant a request arrives, or None.
+
+    Only a report request gets one: it starts a long pipeline. A question used to get
+    "Looking into it..." too, and a reply on every question was noise; questions are
+    covered by the progress signals instead (``_progress_tick``).
+    """
     if is_pipeline_request(text):
         return "On it — starting now..."
-    return "Looking into it — answers usually take 1–5 minutes."
+    return None
+
+
+# ── Progress signals while a session runs ──────────────────────────────────────
+#
+# A three-minute answer with no sign of life was reported as "the listener has
+# paused". In a DM (a Slack assistant thread) LORE shows Slack's own "is thinking..."
+# status: no message, and Slack clears it when the answer is posted. It is refreshed
+# every STATUS_REFRESH_S so a long answer does not outlive it. Where the status is
+# not available (channels, or a DM Slack refuses it for), a question still running
+# after SLOW_NOTE_AFTER_S gets one short note, so a quick answer gets nothing extra.
+
+THINKING_STATUS = "is thinking…"
+STATUS_REFRESH_S = 90
+SLOW_NOTE_AFTER_S = 60
+SLOW_NOTE = "Still working on this — answers can take a few minutes."
+
+
+def _set_status(s: dict, status: str = THINKING_STATUS) -> bool:
+    """Set (or, with "", clear) the assistant-thread status. False if Slack refuses."""
+    try:
+        api.api_post("assistant.threads.setStatus", {
+            "channel_id": s["channel"], "thread_ts": s["thread_ts"], "status": status})
+        return True
+    except Exception as exc:  # noqa: BLE001 — a missing status must never affect the answer
+        print(f"[progress] could not set thread status ({exc})", flush=True)
+        return False
+
+
+def _initial_progress(is_dm: bool, user_text: str) -> str:
+    if is_dm:
+        return "status"
+    return "none" if is_pipeline_request(user_text) else "slow_note"
+
+
+def _progress_tick(now: float | None = None) -> None:
+    """Refresh DM statuses and send any due slow-answer notes, for running sessions."""
+    now = time.time() if now is None else now
+    with _sessions_lock:
+        running = [s for s in _active_sessions
+                   if s.get("proc") is not None and s["proc"].poll() is None]
+    for s in running:
+        if s.get("progress") == "status" and now - s.get("status_set_at", 0) >= STATUS_REFRESH_S:
+            if _set_status(s):
+                s["status_set_at"] = now
+            else:
+                s["progress"] = "none" if is_pipeline_request(s.get("user_text", "")) else "slow_note"
+        if (s.get("progress") == "slow_note" and not s.get("slow_note_sent")
+                and now - s["started_at"] >= SLOW_NOTE_AFTER_S):
+            s["slow_note_sent"] = True
+            try:
+                api.post_message(s["channel"], s["thread_ts"], SLOW_NOTE)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[progress] could not post the slow-answer note ({exc})", flush=True)
 
 
 # ── Core: spawn a Claude session ──────────────────────────────────────────────
@@ -611,6 +670,7 @@ def _launch(
             "orig_thread_ts": orig_thread_ts,
             "user_text":  user_text,
             "is_dm":      is_dm,
+            "progress":   _initial_progress(is_dm, user_text),
         }
         _active_sessions.append(slot)
 
@@ -664,3 +724,4 @@ def _launch(
 
     print(f"[session-start] user={user} session={session_id} pid={proc.pid} "
           f"resumed={bool(resume_id)} active={len(_active_sessions)}", flush=True)
+    _progress_tick()   # sets the DM "thinking" status now, not at the next reaper pass
