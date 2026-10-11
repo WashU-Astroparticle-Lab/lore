@@ -11,6 +11,7 @@ Run: python tests/run_all.py mcp_server   (or: python tests/test_mcp_server.py)
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import os
 import socket
@@ -18,6 +19,12 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
+
+if importlib.util.find_spec("mcp") is None:
+    # The server runs in its own small environment (docs/mcp_ssh_setup.md, step 2), so
+    # LORE's main one need not have the MCP library. Run these with the server's Python.
+    print("SKIP (the mcp library is not installed in this environment)")
+    sys.exit(0)
 
 import lab_agent.cli.ask as ask
 from lab_agent.config import PROJECT_ROOT
