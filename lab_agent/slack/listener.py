@@ -61,7 +61,9 @@ def handle_mention(event, say, logger):
         logger.info(f"Ignoring acknowledgment from {user}")
         return
 
-    say(text=f"<@{user}> {acknowledgement(text)}", thread_ts=thread_ts or current_ts)
+    ack = acknowledgement(text)
+    if ack:
+        say(text=f"<@{user}> {ack}", thread_ts=thread_ts or current_ts)
 
     spawn_claude(user, text, channel, thread_ts, current_ts)
 
@@ -87,7 +89,9 @@ def handle_dm(event, say, logger):
         logger.info(f"Ignoring acknowledgment from {user}")
         return
 
-    api.post_message(channel, thread_ts or current_ts, acknowledgement(text))
+    ack = acknowledgement(text)
+    if ack:
+        api.post_message(channel, thread_ts or current_ts, ack)
 
     spawn_claude(user, text, channel, thread_ts, current_ts, is_dm=True)
 
