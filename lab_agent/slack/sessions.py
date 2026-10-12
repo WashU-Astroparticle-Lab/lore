@@ -523,8 +523,9 @@ def spawn_claude(
             per experiment-report's revision section. Not an edit of your own reply.
 
             Delivery rules (unchanged): your final text output is delivered to Slack
-            automatically after you exit — do NOT post the final reply yourself. A report's
-            final output is <out_dir>/slack_summary.md verbatim, never prose you compose.
+            automatically after you exit, verbatim — do NOT post the final reply yourself, and
+            put nothing in it but the reply (no note on which skill you picked or why). A
+            report's final output is <out_dir>/slack_summary.md verbatim, never prose you compose.
             Post mid-pipeline progress updates with the CLI:
               python -m lab_agent.cli.slack post --channel {channel} --thread {reply_ts} --text-file <path>
         """).strip()
@@ -572,9 +573,15 @@ def spawn_claude(
         report-writer, then the critic, then the upload, then the summary. Shortening your Slack
         message changes nothing the user asked about.
 
+        Small talk — a greeting, "you working?", thanks — matches no row of the routing table
+        and needs no skill: just reply.
+
         How your reply is delivered:
-        Your final text output is posted to Slack automatically after you exit. Do NOT post the
-        final reply yourself — that double-posts. For a report, your final output is the verbatim
+        Your final text output is posted to Slack automatically after you exit, verbatim, so it
+        must contain the reply and nothing else. Never narrate your routing ("This is a simple
+        greeting — no routing skill needed.", "Invoking lab-qa…"): a session that did posted
+        exactly that line to the lab above its answer. Do NOT post the final reply yourself —
+        that double-posts. For a report, your final output is the verbatim
         contents of <out_dir>/slack_summary.md, plus only <@{user}> and a one-line timing
         summary. Read that file; never compose a summary from what the subagents told you.
         (`slack post-summary` is for sending a summary to a CHANNEL, where nothing auto-posts.)
@@ -725,3 +732,15 @@ def _launch(
     print(f"[session-start] user={user} session={session_id} pid={proc.pid} "
           f"resumed={bool(resume_id)} active={len(_active_sessions)}", flush=True)
     _progress_tick()   # sets the DM "thinking" status now, not at the next reaper pass
+    # Reap the moment the session exits. Waiting for the 30 s reaper pass held every
+    # reply back by up to 30 s — a greeting answered in 8 s showed up seconds later.
+    threading.Thread(target=_reap_on_exit, args=(proc,), daemon=True).start()
+
+
+def _reap_on_exit(proc: subprocess.Popen) -> None:
+    proc.wait()
+    try:
+        reap_finished()
+    except Exception as exc:  # noqa: BLE001 — the periodic reaper will retry
+        print(f"[session-done] immediate reap failed ({exc}); the reaper will retry.",
+              flush=True)
