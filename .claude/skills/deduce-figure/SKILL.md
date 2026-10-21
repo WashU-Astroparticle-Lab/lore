@@ -75,7 +75,7 @@ Identify by what the figure *is*, using everything available, cheapest first:
 
 Only ask the user which figure they mean once 1–5 have genuinely failed. And when you cite a figure, cite something durable: its `la_id`, its meaningful filename, or a description of its content — not just "fig_3".
 
-**If it prints `COOKIE_REFRESH_NEEDED`:** run `python get_la_cookies.py` yourself (a figure question genuinely needs the cookie — this overrides the text-only "never refresh" rule). First post a short Slack heads-up (*"Refreshing the LabArchives session — please approve the Duo push on your phone"*), then run it and retry `fetch_page_images`. The script auto-skips if the cookie is still valid and auto-fills credentials; the only human step is the Duo tap (and only when off school wifi). Only if refresh fails/times out, tell the user.
+**If it prints `COOKIE_REFRESH_NEEDED`:** run `python get_la_cookies.py` yourself (a figure question genuinely needs the cookie — this overrides the text-only "never refresh" rule). Run it and retry `fetch_page_images`. The script auto-skips if the cookie is still valid and auto-fills credentials; on the lab machine no one needs to approve anything, so don't ask the user to. Only if refresh fails/times out, tell the user the reason on its `COOKIE_REFRESH_FAILED:` line — never ask them to run the script themselves.
 
 ## Step 1c — if the run has a report, its numbers beat your read of the pixels
 

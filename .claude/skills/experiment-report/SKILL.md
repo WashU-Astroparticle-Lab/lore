@@ -58,7 +58,7 @@ python run.py "<la_page_name_1>" "<la_page_name_2>"
 - If no GitHub URL is given and a GitHub link is found inside a LabArchives page, it is fetched automatically.
 - Output lands in `outputs/<experiment_id>/`: `notebooks.md`, `labarchives.md`, `data_summaries.md`, `dependencies.md`, `github_images/` + `github_images.md`, `labarchives_images/` + `labarchives_images.md`, and (only if requested) `dr_conditions.md`.
 
-**If run.py exits with `COOKIE_REFRESH_NEEDED`:** immediately run `python get_la_cookies.py` (never ask the user), then rerun the exact same `run.py` command. Do not proceed without images.
+**If run.py exits with `COOKIE_REFRESH_NEEDED`:** immediately run `python get_la_cookies.py` yourself (never ask the user to — on the lab machine it logs in with no one's help), then rerun the exact same `run.py` command. Do not proceed without images. If the refresh exits non-zero, its `COOKIE_REFRESH_FAILED:` line says why — tell the user that reason. Never tell them to run the script themselves: it fails the same way for them, and a session that did was rightly told it could have done it itself.
 
 ## Step 2b — collect everything the user said while you worked (after Phase A, never before)
 

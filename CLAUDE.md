@@ -167,7 +167,7 @@ All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from 
 | Resolution regression check | `python -m lab_agent.cli.eval_qa` |
 | **Run the test suite** | `python tests/run_all.py [name-filter]` — one process per file, outbound network **denied** (loopback allowed). Never `for t in tests/test_*.py`: a probe that wrote to the real LabArchives notebook rode along in that glob 27 times, exiting 0 each time |
 | Check a draft's numbers against a report | `python -m lab_agent.cli.verify_claims --draft <file> --source outputs/<id>` — presence only; wrong-label pairing still needs reading |
-| Refresh LabArchives cookies | `python get_la_cookies.py` |
+| Refresh LabArchives cookies | `python get_la_cookies.py` — run it yourself, never ask the user to; it logs in with no one's help. On failure it prints `COOKIE_REFRESH_FAILED: <reason>` |
 | Slack (post/post-summary/upload/read-thread/channels/search/fetch-files) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above. **A report's summary goes out via `post-summary --run outputs/<id>`, never `post`** — it reads the gated `slack_summary.md` and takes no message text |
 | DR conditions | `python run_dr.py "YYYY-MM-DD" [--hours N]` |
 | Disk footprint / retention | `python -m lab_agent.cli.cleanup` (dry run) then `--caches` / `--images` / `--logs` / `--all`. Policy in `lab_agent/retention.py`: the record (reports, extractions, critiques, provenance, metadata, corpus) is never auto-deleted; figures are reclaimed only once the report is uploaded AND the run has been idle for a week. Reading a figure marks it in use, so anything under discussion stays on disk |
