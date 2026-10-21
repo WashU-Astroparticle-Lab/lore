@@ -39,6 +39,7 @@ from .sessions import (
     kg_refresh_hour,
     kg_refresh_loop,
     reaper_loop,
+    remove_stale_reply_files,
     spawn_claude,
 )
 
@@ -104,6 +105,10 @@ def main() -> None:
     print(f"[slack-listener] Bot user ID: {api.BOT_USER_ID or '(unknown)'}")
     print(f"[slack-listener] Session timeout: {SESSION_TIMEOUT // 60} min  "
           f"Max concurrent: {MAX_CONCURRENT}  Per-user cap: {MAX_PER_USER}", flush=True)
+    stale = remove_stale_reply_files()
+    if stale:
+        print(f"[slack-listener] Removed {stale} reply file(s) left by sessions a previous "
+              "listener never reaped.", flush=True)
     threading.Thread(target=reaper_loop, daemon=True).start()
     threading.Thread(target=agent_notes_loop, daemon=True).start()
     print("[slack-listener] Publishing measurement-agent notes from the MCP inbox "

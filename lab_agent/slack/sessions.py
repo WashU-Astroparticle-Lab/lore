@@ -158,6 +158,89 @@ def _deliver_final_output(s: dict, body: str) -> None:
     api.post_message(s["channel"], s["thread_ts"], body)
 
 
+# ── The reply file ────────────────────────────────────────────────────────────
+#
+# A session's reply is the file it writes to reply_path(session_id), not its stdout.
+# Stdout carries whatever the model said on the way, and on 2026-10-20 the lab got it:
+# "I have enough context now. Let me compose the response. ... here's a thorough reply:
+# ---" above one answer, and under it a second turn, woken by a background query that
+# finished late: "The response has already been posted to the thread. Nothing further
+# needed." Stdout is now only the fallback for a session that wrote no file, cleaned of
+# the shapes those leaks took.
+
+REPLY_DIR = PROJECT_ROOT / ".lore_tmp"
+
+_WAITING = re.compile(r"\bwaiting for\b", re.IGNORECASE)
+_RULE = re.compile(r"-{3,}|\*{3,}|_{3,}")
+_ALREADY_SENT = re.compile(
+    r"\balready (?:been )?(?:posted|delivered|sent)\b|\bnothing further\b", re.IGNORECASE)
+
+
+def reply_path(session_id: str) -> Path:
+    return REPLY_DIR / f"reply_{session_id}.md"
+
+
+def remove_stale_reply_files() -> int:
+    """Delete reply files no session will claim: those left when a listener died mid-session.
+
+    Called at listener start, when no session is running. Each reaped session deletes its
+    own, so this only catches what a crash or restart left behind.
+    """
+    removed = 0
+    for p in REPLY_DIR.glob("reply_*.md"):
+        try:
+            p.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
+
+
+def clean_stdout_reply(text: str) -> str:
+    """Strip the narration a session's stdout carries around its answer.
+
+    Three shapes, each from a reply the lab received: leading "Waiting for the
+    github-analyst..." turns from background agents; a lead-in ending in a colon and a
+    "---" rule ("Here's my final reply to the user:"); trailing turns saying the answer is
+    already out. Anything else is left alone, and if nothing would remain the text is
+    returned whole: a cluttered reply is better than none.
+    """
+    paras = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    while paras and len(paras[0]) <= 300 and _WAITING.search(paras[0]):
+        paras.pop(0)
+    for i, p in enumerate(paras[:4]):
+        if _RULE.fullmatch(p.strip()):
+            lead_in = "\n\n".join(paras[:i])
+            if i and lead_in.rstrip().endswith(":") and len(lead_in) <= 400:
+                paras = paras[i + 1:]
+            break
+    while paras and len(paras[-1]) <= 400 and _ALREADY_SENT.search(paras[-1]):
+        paras.pop()
+    cleaned = "\n\n".join(paras).strip()
+    return cleaned or text.strip()
+
+
+def _reply_body(s: dict) -> str:
+    """What to post for a finished session: its reply file, else its stdout, cleaned."""
+    reply_file = s.get("reply_file")
+    if reply_file:
+        try:
+            text = Path(reply_file).read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            text = ""
+        if text:
+            return text
+    log_path = s.get("session_log")
+    if not log_path or not Path(log_path).exists():
+        return ""
+    lines = Path(log_path).read_text(encoding="utf-8", errors="replace").splitlines()
+    raw = "\n".join(lines[1:] if lines and lines[0].startswith("=== Session") else lines).strip()
+    if raw:
+        print(f"[session-done] session={s['session_id']} wrote no reply file; posting its "
+              "output, cleaned of narration.", flush=True)
+    return clean_stdout_reply(raw) if raw else ""
+
+
 def _reap_nolock() -> None:
     """Reap finished/timed-out sessions. Caller must hold _sessions_lock."""
     now = time.time()
@@ -180,15 +263,11 @@ def _reap_nolock() -> None:
                   f"elapsed={elapsed_r}s exit={exit_code}", flush=True)
             log_path = s.get("session_log")
             if exit_code == 0:
-                # Deliver Claude's final output to Slack directly from the log.
-                # Claude writes its response to stdout (captured in log); the
-                # listener posts it so Claude doesn't need to call curl itself.
-                if log_path and Path(log_path).exists():
-                    raw = Path(log_path).read_text(encoding="utf-8", errors="replace")
-                    lines = raw.splitlines()
-                    body = "\n".join(lines[1:] if lines and lines[0].startswith("=== Session") else lines).strip()
-                    if body:
-                        _deliver_final_output(s, body)
+                # Deliver the session's reply (its reply file; stdout as a fallback). The
+                # listener posts it so the session doesn't need to post its answer itself.
+                body = _reply_body(s)
+                if body:
+                    _deliver_final_output(s, body)
             elif not s.get("timed_out"):
                 tail = read_log_tail(log_path) if log_path else ""
                 limit_keywords = ("hit your limit", "rate limit", "usage limit",
@@ -219,13 +298,14 @@ def _reap_nolock() -> None:
                         f"<@{s['user']}> The session ended unexpectedly (exit {exit_code}). "
                         f"Check session log: `{log_name}`")
             _active_sessions.remove(s)
-            # Clean up the prompt file now that the session is over
-            pf = s.get("prompt_file")
-            if pf and Path(pf).exists():
-                try:
-                    Path(pf).unlink()
-                except Exception:
-                    pass
+            # Clean up the prompt and reply files now that the session is over
+            for key in ("prompt_file", "reply_file"):
+                f = s.get(key)
+                if f and Path(f).exists():
+                    try:
+                        Path(f).unlink()
+                    except Exception:
+                        pass
 
     # Prune seen-timestamp set to prevent unbounded growth
     if len(_seen_timestamps) > 500:
@@ -506,6 +586,7 @@ def spawn_claude(
     # so it gets a short continuation prompt instead of the cold-start prompt.
     thread_key = str(reply_ts)
     resume_id = resumable_session(thread_key)
+    reply_file = reply_path(session_id)
 
     if resume_id:
         prompt = textwrap.dedent(f"""
@@ -522,16 +603,19 @@ def spawn_claude(
             parameters") is a revision of the REPORT — report-writer, critic, upload, summary,
             per experiment-report's revision section. Not an edit of your own reply.
 
-            Delivery rules (unchanged): your final text output is delivered to Slack
-            automatically after you exit, verbatim — do NOT post the final reply yourself, and
-            put nothing in it but the reply (no note on which skill you picked or why). A
-            report's final output is <out_dir>/slack_summary.md verbatim, never prose you compose.
-            Post mid-pipeline progress updates with the CLI:
+            Delivery rules: your reply this time is the file {reply_file} (a new path: the
+            reply file from earlier turns is gone). As your LAST step, write the whole reply there
+            with the Write tool; it is posted to Slack verbatim after you exit, and nothing you
+            print is. Put nothing in it but the reply: no "Here's my reply:" lead-in, no "---",
+            no note on which skill you picked. If a background task finishes after you wrote
+            it, rewrite the file only if the result changes the answer. Do NOT post the reply
+            yourself. A report's reply is <out_dir>/slack_summary.md verbatim, never prose you
+            compose. Post mid-pipeline progress updates with the CLI:
               python -m lab_agent.cli.slack post --channel {channel} --thread {reply_ts} --text-file <path>
         """).strip()
         return _launch(user, channel, reply_ts, current_ts, prompt, resume_id=resume_id,
-                       thread_key=thread_key, orig_thread_ts=thread_ts, user_text=text,
-                       is_dm=is_dm)
+                       thread_key=thread_key, session_id=session_id, orig_thread_ts=thread_ts,
+                       user_text=text, is_dm=is_dm)
 
     history_str = fetch_history(channel, thread_ts, current_ts)
 
@@ -574,16 +658,20 @@ def spawn_claude(
         message changes nothing the user asked about.
 
         Small talk — a greeting, "you working?", thanks — matches no row of the routing table
-        and needs no skill: just reply.
+        and needs no skill: just write the reply file.
 
         How your reply is delivered:
-        Your final text output is posted to Slack automatically after you exit, verbatim, so it
-        must contain the reply and nothing else. Never narrate your routing ("This is a simple
-        greeting — no routing skill needed.", "Invoking lab-qa…"): a session that did posted
-        exactly that line to the lab above its answer. Do NOT post the final reply yourself —
-        that double-posts. For a report, your final output is the verbatim
-        contents of <out_dir>/slack_summary.md, plus only <@{user}> and a one-line timing
-        summary. Read that file; never compose a summary from what the subagents told you.
+        Your reply is the file {reply_file}. As your LAST step, write the whole reply there with
+        the Write tool; the listener posts that file to the thread, verbatim, after you exit.
+        Nothing you print is posted — your printed output used to be, and the lab received
+        "I have enough context now. Let me compose the response." above an answer. So the file
+        holds the reply and nothing else: no "Here's my reply:" lead-in, no "---", no note on
+        which skill you picked or why. Write it when the answer is final. If a background task
+        finishes after that, rewrite the file only if the result changes the answer; never
+        write that the answer was already sent. Do NOT post the reply yourself — that
+        double-posts. For a report, the reply is the verbatim contents of
+        <out_dir>/slack_summary.md, plus only <@{user}> and a one-line timing summary. Read
+        that file; never compose a summary from what the subagents told you.
         (`slack post-summary` is for sending a summary to a CHANNEL, where nothing auto-posts.)
 
         For mid-pipeline progress updates, use the CLI (never a hand-written python -c with a
@@ -670,6 +758,7 @@ def _launch(
             "session_id": session_id,
             "session_log": None,
             "prompt_file": None,
+            "reply_file": reply_path(session_id),
             "timed_out":  False,
             "thread_key": thread_key,
             "resume_of":  resume_id,
@@ -685,6 +774,7 @@ def _launch(
     logs_dir = PROJECT_ROOT / "session_logs"
     logs_dir.mkdir(exist_ok=True)
     session_log = logs_dir / f"session_{session_id}_{user}.log"
+    REPLY_DIR.mkdir(exist_ok=True)
 
     prompt_file = PROJECT_ROOT / f"_prompt_{user}_{session_id}.txt"
     prompt_file.write_text(prompt, encoding="utf-8")

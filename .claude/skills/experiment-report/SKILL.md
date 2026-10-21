@@ -81,7 +81,7 @@ Handle every message since you started, not just the DR line:
 Then:
 - **yes** with a date/window → fetch DR data (below), spawn `dr-analyst`, wait, then proceed to Phase B.
 - **no** → proceed directly to Phase B; do not mention DR conditions anywhere in the report.
-- **No answer yet** (Slack only) → write this reminder as your final text output and exit: *"The report analysis is ready — I just need your answer on dilution refrigerator conditions to finish. Reply with a date/time window to include them, or 'no' to skip."* The next session picks up from here: outputs and `extracted_*.md` already exist, so it must NOT re-run `run.py` or Phase A — it resolves the DR answer and continues from Phase B.
+- **No answer yet** (Slack only) → write this reminder as your reply and exit: *"The report analysis is ready — I just need your answer on dilution refrigerator conditions to finish. Reply with a date/time window to include them, or 'no' to skip."* The next session picks up from here: outputs and `extracted_*.md` already exist, so it must NOT re-run `run.py` or Phase A — it resolves the DR answer and continues from Phase B.
 
 If **yes** with a date only (e.g. "Feb 18 2025"), use `window_hours` (±N hours around the full calendar day):
 ```python
@@ -179,7 +179,7 @@ unless the verdict is `passed`, printing what to do instead. You cannot skip the
 going straight to the upload — a run did exactly that, uploading 90 seconds after the critic wrote
 `gaps_found: 1`, with no revision and no second critique. If you genuinely disagree with the
 critique, `--force` exists, but say so in your reply to the user rather than using it quietly.
-- **`expert_needed: <question>`** or **`human_needed: <what is broken>`** → do **not** upload. Write the critic's specific question(s) as your final text output and stop.
+- **`expert_needed: <question>`** or **`human_needed: <what is broken>`** → do **not** upload. Write the critic's specific question(s) as your reply and stop.
 
 **Deterministic structural gate (before upload):**
 
@@ -229,10 +229,11 @@ Distils a per-experiment concept into `knowledge/experiments/<id>.md`. When a hu
 ## Step 5 — post the Slack summary (do NOT write your own)
 
 `report-writer` produced `<out_dir>/slack_summary.md`, and the critic checked its numbers and
-hedging against the report. **Read that file and emit its contents verbatim as your final text
-output**, adding only the `<@user>` tag and a one-line timing summary. In a Slack session the
-listener posts your final output automatically ([sessions.py](../../../lab_agent/slack/sessions.py)),
-so that IS the reply — do not also post it yourself, which double-posts.
+hedging against the report. **Read that file and make its contents, verbatim, your reply**
+(in Slack, the reply file named in your prompt), adding only the `<@user>` tag and a one-line
+timing summary. In a Slack session the listener posts the reply file automatically
+([sessions.py](../../../lab_agent/slack/sessions.py)) — do not also post it yourself, which
+double-posts.
 
 **Sending a summary to a channel** is the other case: nothing auto-posts there, so use the
 command, which reads the same gated file and accepts no message text at all.
@@ -256,7 +257,7 @@ When the user asks for a change to a report that is already written or uploaded 
 1. Spawn **`report-writer`** with: `<out_dir> = <path>. User revision — <the user's request, verbatim>.` It rebuilds from the extracted files, not from the old draft.
 2. Re-spawn **`critic`**, and handle its verdict exactly as in Phase D.
 3. Re-run the structural gate, then re-upload with `python upload_to_labarchives.py outputs/<experiment_id>` — which now revises the existing page instead of creating a duplicate.
-4. Emit the revised `slack_summary.md` verbatim as your final text output (Step 5).
+4. Make the revised `slack_summary.md`, verbatim, your reply (Step 5).
 
 **"Make it shorter" means the report, not your message.** A revision request is always about
 the document; shortening your own Slack reply changes nothing the user asked about. Asked to
