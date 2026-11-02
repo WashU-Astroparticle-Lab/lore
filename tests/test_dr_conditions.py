@@ -5,6 +5,11 @@ The logs are built here in the Leiden software's own layout with the 2026 labels
 the previous fixed-column, kelvin-limit parser went wrong: it dropped every
 mixing-chamber reading and reported TT-26006 [MC] at 47 mK as "4K (TT-2450): 47 K".
 
+The software writes one file per bridge channel (``_N.dat``), and each row repeats every
+other channel's last reading. ``write_channels`` writes the same rows to several channel
+files, which is enough wherever a test does not care about the copies; the copy pattern
+itself is built row by row in ``test_each_channel_is_read_only_from_its_own_file``.
+
 Run: python tests/run_all.py dr_conditions   (or: python tests/test_dr_conditions.py)
 """
 from __future__ import annotations
@@ -16,6 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from lab_agent.dr import get_dr_conditions
+from lab_agent.dr.live import collect_readings, file_channel
 
 NAMES = "Date1\tDate2\tR0\tT0\tT1\tT2\tT3\tT4\tT5\tT6"
 LABELS = ("Date(String)\tDate(Number)\tC_still [Still]\tC_still [Still]\t3K Plate\t"
@@ -34,6 +40,16 @@ def write(folder: Path, name: str, rows: list[str], header: bool = True) -> None
     (folder / name).write_text("\n".join(head + rows) + "\n", encoding="utf-8")
 
 
+SESSION = "LogLCR___2026-09-24-00-00-00"
+# T1 3K Plate, T2 Still Plate, T3 TT-26006 [MC], T4 CMN223 [MC P], T6 50mK Plate.
+SCANNED = (1, 2, 3, 4, 6)
+
+
+def write_channels(folder: Path, rows: list[str], channels=SCANNED) -> None:
+    for n in channels:
+        write(folder, f"{SESSION}_{n}.dat", rows)
+
+
 def minutes(start: datetime, n: int, step: float = 1.0) -> list[datetime]:
     return [start + timedelta(minutes=i * step) for i in range(n)]
 
@@ -41,9 +57,8 @@ def minutes(start: datetime, n: int, step: float = 1.0) -> list[datetime]:
 def test_mc_thermometers_are_read_by_label_in_mk():
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
-        write(d, "LogLCR___2026-09-24-00-00-00_0.dat",
-              [row(t, tt=f"{45 + (i % 3)}.0E+0", plate3k=f"{2890 + i % 5}E+0")
-               for i, t in enumerate(minutes(DAY + timedelta(hours=10), 30))])
+        write_channels(d, [row(t, tt=f"{45 + (i % 3)}.0E+0", plate3k=f"{2890 + i % 5}E+0")
+                           for i, t in enumerate(minutes(DAY + timedelta(hours=10), 30))])
         md = get_dr_conditions(d, DAY, window_hours=0)
     assert md, "no summary for a window full of readings"
     assert "| TT-26006 [MC] | 45.0 mK | 46.0 mK | 47.0 mK |" in md, md
@@ -63,7 +78,7 @@ def test_a_warm_excursion_is_reported_as_a_thermal_event():
         rows += [row(t, tt=f"{1500 + 100 * i}E+0", cmn="NaN")
                  for i, t in enumerate(minutes(t0 + timedelta(minutes=10), 18))]
         rows += [row(t) for t in minutes(t0 + timedelta(minutes=30), 10)]
-        write(d, "LogLCR___2026-09-24-00-00-00_0.dat", rows)
+        write_channels(d, rows)
         md = get_dr_conditions(d, DAY, window_hours=0)
     assert "## Thermal Event Warnings" in md, md
     assert "readings of TT-26006 [MC]" in md, "the gap must be watched on the resistive MC thermometer"
@@ -71,25 +86,68 @@ def test_a_warm_excursion_is_reported_as_a_thermal_event():
     assert "significant" in md, md
 
 
-def test_a_held_value_is_not_reported_as_a_temperature():
+def test_each_channel_is_read_only_from_its_own_file():
+    # The real pattern: the bridge reads channel 3, then channel 4, ten seconds apart. Each
+    # file's row repeats the other channel's last reading, stamped with its own time.
+    # Merging every column counted each reading twice, ten seconds late the second time.
+    t0 = DAY + timedelta(hours=10)
+    tt = [f"{40 + i}.0E+0" for i in range(6)]
+    cmn = [f"{12 + i / 10:.1f}E+0" for i in range(6)]
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
-        write(d, "LogLCR___2026-09-24-00-00-00_0.dat",
-              [row(t, tt=f"{45 + (i % 3)}.0E+0") for i, t in
-               enumerate(minutes(DAY + timedelta(hours=1), 150))])
+        write(d, f"{SESSION}_3.dat", [row(t0 + timedelta(seconds=20 * i), tt=tt[i],
+                                          cmn=cmn[i - 1] if i else "NaN") for i in range(6)])
+        write(d, f"{SESSION}_4.dat", [row(t0 + timedelta(seconds=20 * i + 10), tt=tt[i],
+                                          cmn=cmn[i]) for i in range(6)])
+        readings, files, _ = collect_readings(d, t0, t0 + timedelta(minutes=5))
         md = get_dr_conditions(d, DAY, window_hours=0)
-    # 3K Plate, Still Plate, 50mK Plate and the CMN are constant in this fixture.
+    assert [ts.second for ts, _ in readings["TT-26006 [MC]"]] == [0, 20, 40, 0, 20, 40], (
+        "TT-26006 readings must carry the times channel 3 was measured, not channel 4's copies")
+    assert [v for _, v in readings["TT-26006 [MC]"]] == [40, 41, 42, 43, 44, 45]
+    assert [ts.second for ts, _ in readings["CMN223 [MC P]"]] == [10, 30, 50, 10, 30, 50]
+    assert "| TT-26006 [MC] | 40.0 mK | 42.5 mK | 45.0 mK | 45.0 mK (09-24 10:01) | 6 |" in md, md
+    assert readings["3K Plate"] == [] and readings["Still Plate"] == [], (
+        "a thermometer with no file of its own was not scanned; its copies are not readings")
+    assert len(files) == 2
+
+
+def test_a_channel_the_bridge_did_not_scan_is_not_given_a_value():
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write(d, f"{SESSION}_3.dat", [row(t, tt=f"{45 + (i % 3)}.0E+0") for i, t in
+                                      enumerate(minutes(DAY + timedelta(hours=1), 150))])
+        md = get_dr_conditions(d, DAY, window_hours=0)
+    # Only channel 3 (TT-26006) has a file; the rest of each row is copies.
+    assert "**Not measured in this window:** 3K Plate, Still Plate, CMN223 [MC P], 50mK Plate." in md, md
+    assert "| 3K Plate" not in md and "| CMN223" not in md, "a copy was reported as a reading"
+    assert "MXC base temperature, CMN223" not in md, "an unscanned MC value was presented as base"
+    assert "MXC base temperature, TT-26006 [MC]" in md, md
+
+
+def test_a_file_without_a_channel_number_is_read_whole_and_held_values_flagged():
+    # No such file exists on the lab PC today; if one appears, every column is read and
+    # the held-value check is what keeps a frozen copy from passing as a temperature.
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write(d, f"{SESSION}.dat", [row(t, tt=f"{45 + (i % 3)}.0E+0") for i, t in
+                                    enumerate(minutes(DAY + timedelta(hours=1), 150))])
+        md = get_dr_conditions(d, DAY, window_hours=0)
     assert "| 3K Plate (held value) |" in md, md
     assert "**Held values:**" in md and "Do not use it" in md, md
     assert "MXC base temperature, CMN223" not in md, "a held MC value was presented as base"
     assert "MXC base temperature, TT-26006 [MC]" in md, md
 
 
+def test_the_channel_comes_from_the_file_name():
+    assert file_channel("LogLCR___2026-10-28-08-45-29_5.dat") == 5
+    assert file_channel("LogLCR2___2025-01-27-17-44-48_0.dat") == 0
+    assert file_channel("LogLCR___2026-10-28-08-45-29.dat") is None, "a session stub has no channel"
+
+
 def test_stubs_old_files_and_missing_pressure_are_handled_honestly():
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
-        write(d, "LogLCR___2026-09-24-00-00-00_0.dat",
-              [row(t) for t in minutes(DAY + timedelta(hours=10), 5)])
+        write(d, f"{SESSION}_3.dat", [row(t) for t in minutes(DAY + timedelta(hours=10), 5)])
         write(d, "LogLCR___2026-09-24-00-00-00.dat",
               [row(DAY + timedelta(hours=10), tt="9999E+0")], header=False)
         old = d / "LogLCR___2026-07-04-17-42-42_3.dat"
@@ -106,8 +164,7 @@ def test_stubs_old_files_and_missing_pressure_are_handled_honestly():
 def test_pressures_still_come_from_logfp_when_it_is_written():
     with tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
-        write(d, "LogLCR___2026-09-24-00-00-00_0.dat",
-              [row(t) for t in minutes(DAY + timedelta(hours=10), 5)])
+        write(d, f"{SESSION}_3.dat", [row(t) for t in minutes(DAY + timedelta(hours=10), 5)])
         fp = ["#Date\tP1\tP2\tP3\tP4"] + [
             f"{t.strftime('%Y-%m-%d %H:%M:%S')}\t7.3\t-4.8\t172.1\t-4.8"
             for t in minutes(DAY + timedelta(hours=10), 5)]

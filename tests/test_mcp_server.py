@@ -250,6 +250,17 @@ def _write_lcr(folder: Path, name: str, rows: list[str], header: bool = True,
     return path
 
 
+# The software writes one file per bridge channel, and only channel N's column in _N.dat
+# is a measurement. Writing the same rows to each scanned channel's file gives every
+# thermometer its readings. T1 3K Plate, T2 Still Plate, T3 TT-26006, T4 CMN, T6 50mK Plate.
+_SESSION = "LogLCR___2026-09-24-15-02-58"
+
+
+def _write_channels(folder: Path, rows: list[str], channels=(1, 2, 3, 4, 6)) -> None:
+    for n in channels:
+        _write_lcr(folder, f"{_SESSION}_{n}.dat", rows)
+
+
 @contextlib.contextmanager
 def _dr_folder():
     saved = os.environ.get("DR_DATA_PATH")
@@ -267,7 +278,7 @@ def _dr_folder():
 def test_dr_status_takes_labels_from_the_log_header():
     now = datetime(2026, 9, 24, 18, 0, 0)
     with _dr_folder() as d:
-        _write_lcr(d, "LogLCR___2026-09-24-15-02-58_0.dat", [
+        _write_channels(d, [
             _lcr_row("2026-09-24 17:50:00", t4="12.60E+0"),
             _lcr_row("2026-09-24 17:59:30", t3="NaN", t4="12.44E+0"),
         ])
@@ -288,32 +299,39 @@ def test_dr_status_takes_labels_from_the_log_header():
     assert all("pressure" in w for w in r["warnings"]), r["warnings"]
 
 
-def test_dr_status_merges_segments_and_skips_what_it_cannot_trust():
+def test_dr_status_reads_each_channel_from_its_own_file_and_skips_what_it_cannot_trust():
     now = datetime(2026, 9, 24, 18, 0, 0)
     with _dr_folder() as d:
-        # Parallel segments of one session: the newest reading is in _1, not _0.
-        _write_lcr(d, "LogLCR___2026-09-24-15-02-58_0.dat", [_lcr_row("2026-09-24 17:40:00")])
-        _write_lcr(d, "LogLCR___2026-09-24-15-02-58_1.dat",
-                   [_lcr_row("2026-09-24 17:58:00", t4="11.90E+0")])
+        # The CMN (channel 4) was measured at 17:40 and 17:58. Channel 3's row at 17:59
+        # repeats an older CMN value: a copy, not a newer reading.
+        _write_lcr(d, f"{_SESSION}_4.dat", [_lcr_row("2026-09-24 17:40:00"),
+                                            _lcr_row("2026-09-24 17:58:00", t4="11.90E+0")])
+        _write_lcr(d, f"{_SESSION}_3.dat", [_lcr_row("2026-09-24 17:59:00", t4="12.48E+0")])
         # A header-less stub: its columns cannot be named, so it is never read.
-        _write_lcr(d, "LogLCR___2026-09-24-15-02-58.dat",
+        _write_lcr(d, f"{_SESSION}.dat",
                    [_lcr_row("2026-09-24 17:59:59", t4="999.0E+0")], header=False)
         # An old session last written long before the window: never opened.
-        old = _write_lcr(d, "LogLCR___2026-07-04-17-42-42_3.dat",
+        old = _write_lcr(d, "LogLCR___2026-07-04-17-42-42_4.dat",
                          [_lcr_row("2026-09-24 17:59:00", t4="777.0E+0")],
                          mtime=datetime(2026, 7, 10, 16, 55))
         r = core.dr_status(2, now=now)
     mc = r["channels"]["CMN223 [MC P]"]
-    assert mc["latest_mK"] == 11.9 and mc["latest_at"] == "2026-09-24 17:58:00", mc
+    assert mc["latest_mK"] == 11.9 and mc["latest_at"] == "2026-09-24 17:58:00", (
+        "channel 3's copy of the CMN was taken as its newest reading", mc)
+    assert mc["n"] == 2, mc
     assert mc["max_mK"] < 100, "a stub or an out-of-window file leaked into the readings"
-    assert r["source"]["stub_files_skipped"] == ["LogLCR___2026-09-24-15-02-58.dat"], r["source"]
+    assert r["channels"]["TT-26006 [MC]"]["n"] == 1, r["channels"]
+    # 3K, Still and 50mK Plate have no file of their own: not scanned, so no value.
+    assert {"3K Plate", "Still Plate", "50mK Plate"} <= set(r["not_scanned"]), r["not_scanned"]
+    assert "3K Plate" not in r["channels"], r["channels"]
+    assert r["source"]["stub_files_skipped"] == [f"{_SESSION}.dat"], r["source"]
     assert old.name not in r["source"]["files_read"], r["source"]
 
 
 def test_dr_status_says_when_it_cannot_be_trusted():
     now = datetime(2026, 9, 24, 18, 0, 0)
     with _dr_folder() as d:
-        _write_lcr(d, "LogLCR___2026-09-24-15-02-58_0.dat", [_lcr_row("2026-09-24 17:00:00")])
+        _write_lcr(d, f"{_SESSION}_4.dat", [_lcr_row("2026-09-24 17:00:00")])
         stale = core.dr_status(2, now=now)
         assert any("stale" in w for w in stale["warnings"]), stale["warnings"]
         assert any("pressure" in w for w in stale["warnings"]), (
@@ -423,7 +441,7 @@ def test_tools_never_write_to_stdout():
         with _corpus({"p": "text"}):
             core.resolve("BE1"), core.read_page("p"), core.search("text"), core.status()
         with _dr_folder() as d:
-            _write_lcr(d, "LogLCR___2026-09-24-15-02-58_0.dat", [_lcr_row("2026-09-24 17:59:00")])
+            _write_lcr(d, f"{_SESSION}_4.dat", [_lcr_row("2026-09-24 17:59:00")])
             core.dr_status(2, now=datetime(2026, 9, 24, 18, 0, 0))
     assert captured.getvalue() == "", f"stdout was written: {captured.getvalue()!r}"
 

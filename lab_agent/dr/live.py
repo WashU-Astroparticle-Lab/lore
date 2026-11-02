@@ -14,9 +14,14 @@ This module takes neither shortcut:
   stubs the software leaves when a session starts; it is skipped, never guessed at.
 * **Only files written during the window are opened.** The logs are append-only, so a
   file last modified before the window starts holds nothing in it.
-* **A session's segments are merged.** The software writes several ``_N`` files in
-  parallel, each scanning channels in turn, so one row holds some channels and NaN for
-  the rest. The latest reading of a channel is its newest finite, positive value.
+* **Each channel is read only from its own file.** The bridge measures one channel at a
+  time, and the software writes one file per channel: ``_5.dat`` gets a row each time
+  channel 5 is measured. That row also carries every other T column, repeating each
+  one's last reading under this row's time. Reading every column of every file counted
+  each measurement 3-4 times, stamped up to 15 s after it was taken: 4,072 RuOx rows for
+  an afternoon that had 1,251 RuOx measurements. A thermometer with no file of its own in
+  the window was not being scanned, and is listed with no readings rather than with
+  copies of an old one.
 
 Values are returned as logged, in mK. Standard library only, and read-only: nothing
 here writes a file.
@@ -34,7 +39,14 @@ LCR_GLOB = "LogLCR___*.dat"
 OTHER_LOG_GLOBS = ("logFP___*.dat", "logPT___*.dat", "LogLCR2___*.dat")
 
 _SESSION_TS = re.compile(r"(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})")
+_FILE_CHANNEL = re.compile(r"_(\d)\.dat$", re.IGNORECASE)
 _ROW_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def file_channel(name: str) -> int | None:
+    """The bridge channel a LogLCR file belongs to: ``..._5.dat`` -> 5, else None."""
+    m = _FILE_CHANNEL.search(name)
+    return int(m.group(1)) if m else None
 
 
 def _session_start(name: str) -> datetime | None:
@@ -71,8 +83,14 @@ def _value(text: str) -> float | None:
     return v if math.isfinite(v) and v > 0 else None
 
 
-def read_lcr_file(path: Path, start: datetime, end: datetime) -> dict[str, list[tuple[datetime, float]]] | None:
+def read_lcr_file(path: Path, start: datetime, end: datetime, channel: int | None = None,
+                  ) -> dict[str, list[tuple[datetime, float]]] | None:
     """Readings per labelled thermometer in one LogLCR file, for rows in [start, end].
+
+    With ``channel`` (the file's ``_N``), only column T<channel> is read: the other T
+    columns are copies of earlier readings. Every thermometer in the header is still a
+    key, with an empty list, so a caller can tell "not measured here" from "not wired".
+    Without it, every column is read.
 
     Returns None when the file has no header row to take labels from.
     """
@@ -90,6 +108,8 @@ def read_lcr_file(path: Path, start: datetime, end: datetime) -> dict[str, list[
                 if re.fullmatch(r"T\d", n.strip()) and i < len(labels)
                 and _is_thermometer(labels[i])]
     readings: dict[str, list[tuple[datetime, float]]] = {label: [] for _, label in channels}
+    if channel is not None:
+        channels = [(i, label) for i, label in channels if names[i].strip() == f"T{channel}"]
     for line in lines[4:]:
         parts = line.rstrip("\r\n").split("\t")
         try:
@@ -126,8 +146,10 @@ def collect_readings(root: Path, start: datetime, end: datetime, pattern: str = 
                      ) -> tuple[dict[str, list[tuple[datetime, float]]], list[str], list[str]]:
     """Every labelled thermometer's (time, mK) readings in [start, end], time-sorted.
 
-    Opens only files that can hold rows in the window, merges a session's parallel
-    segments, and skips header-less stubs. Returns (readings, files read, stubs skipped).
+    Opens only files that can hold rows in the window, takes each channel's readings from
+    its own ``_N`` file only, and skips header-less stubs. A thermometer the bridge did not
+    scan in the window is present with an empty list. Returns (readings, files read, stubs
+    skipped).
     """
     merged: dict[str, list[tuple[datetime, float]]] = {}
     files_read, stubs_skipped = [], []
@@ -137,7 +159,7 @@ def collect_readings(root: Path, start: datetime, end: datetime, pattern: str = 
             continue
         if _mtime(f) < start:
             continue  # append-only: nothing written after the window began
-        chunk = read_lcr_file(f, start, end)
+        chunk = read_lcr_file(f, start, end, file_channel(f.name))
         if chunk is None:
             stubs_skipped.append(f.name)
             continue
@@ -154,8 +176,9 @@ def recent_thermometry(data_path: str | Path, start: datetime, end: datetime) ->
 
     Returns plain data (no prose) so a caller can format it: per channel the latest
     reading and its time, and min / median / max / count over the window, all in mK;
-    when the log was last written; which files were read or skipped; and the newest
-    of the other logs, so a missing pressure log is visible rather than silent.
+    the thermometers the bridge did not scan; when the log was last written; which files
+    were read or skipped; and the newest of the other logs, so a missing pressure log is
+    visible rather than silent.
     """
     root = Path(data_path)
     if not root.is_dir():
@@ -196,6 +219,7 @@ def recent_thermometry(data_path: str | Path, start: datetime, end: datetime) ->
         "window_end": end.isoformat(sep=" ", timespec="minutes"),
         "newest_reading_at": newest.isoformat(sep=" ") if newest else None,
         "channels": channels,
+        "not_scanned": sorted(label for label, pts in merged.items() if not pts),
         "files_read": files_read,
         "stub_files_skipped": stubs_skipped,
         "other_logs_last_written": other_logs,

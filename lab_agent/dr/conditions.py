@@ -181,6 +181,7 @@ def get_dr_conditions(
     secondary, _, _ = collect_readings(data_path, start, end, pattern="LogLCR2___*.dat")
     for label, pts in secondary.items():
         temps.setdefault(f"{label} (LCR2)", []).extend(pts)
+    not_scanned = [label for label, pts in temps.items() if not pts]
     temps = {label: pts for label, pts in temps.items() if pts}
 
     fp_data: dict[str, list[float]] = {f"P{i}": [] for i in range(1, 5)}
@@ -207,7 +208,9 @@ def get_dr_conditions(
         f"**Thermometry samples:** {samples}",
         f"**Pressure samples:** {len(fp_data['P1'])}",
         "",
-        "Channel names are taken from the log file headers; values are logged in mK.",
+        "Channel names are taken from the log file headers; values are logged in mK. "
+        "Each channel's readings come from its own log file (`_N.dat` for bridge channel N), "
+        "so N counts real measurements at the time each was taken.",
     ]
 
     if temps:
@@ -232,6 +235,11 @@ def get_dr_conditions(
                       "value for the whole window. The bridge was most likely not scanning "
                       "these channels, so the number is the last reading before the window, "
                       "not a measurement during it. Do not use it as the stage's temperature."]
+        if not_scanned:
+            lines += ["", "**Not measured in this window:** " + ", ".join(not_scanned) + ". "
+                      "The bridge took no valid reading of these channels (most likely it "
+                      "was not scanning them), so no value is given. Numbers the log shows "
+                      "for them in other channels' files are copies of older readings."]
 
         # The most important numbers: each MC thermometer at base.
         for label, pts in temps.items():

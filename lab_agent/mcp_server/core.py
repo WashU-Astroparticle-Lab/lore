@@ -334,13 +334,16 @@ def dr_status(hours: float = 2.0, now: datetime | None = None) -> dict:
         "window": {"hours": hours, "start": result["window_start"], "end": result["window_end"]},
         "newest_reading_at": newest,
         "channels": result["channels"],
+        "not_scanned": result["not_scanned"],
         "warnings": warnings,
         "source": {"files_read": result["files_read"],
                    "stub_files_skipped": result["stub_files_skipped"],
                    "other_logs_last_written": result["other_logs_last_written"]},
         "note": ("Read-only view of the fridge's own log on LORE's machine; channel names "
                  "come from the log header. The fridge's controls and alarms are "
-                 "authoritative, not this. Labels with [MC] are on the mixing chamber."),
+                 "authoritative, not this. Labels with [MC] are on the mixing chamber. "
+                 "not_scanned lists thermometers the bridge did not measure in this "
+                 "window: no value is known for them."),
     }
 
 
