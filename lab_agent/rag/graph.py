@@ -156,15 +156,52 @@ def _local_embed_func():
     return EmbeddingFunc(embedding_dim=dim, max_token_size=limit, func=_embed)
 
 
+def claude_text_only_args(model: str | None = None) -> list[str]:
+    """``claude -p`` arguments for a call that may only read its prompt and write text.
+
+    The graph's LLM is handed the text of LabArchives pages and graph excerpts, so it must
+    not be an agent. It used to run with ``--dangerously-skip-permissions`` from the LORE
+    checkout: it loaded LORE's CLAUDE.md, skills and MCP servers, could run any tool, and
+    once answered a graph query by running ``query_kb`` itself ("The knowledge-graph query
+    is still running in the background..."), an answer that is still in the cache. Any
+    page text that read like an instruction could have been run on the lab PC.
+    """
+    args = ["-p", "--tools", "", "--strict-mcp-config", "--disable-slash-commands",
+            "--no-session-persistence"]
+    if model:
+        args += ["--model", model]
+    return args
+
+
+def llm_sandbox_dir() -> Path:
+    """An empty working directory for those calls, outside the repo.
+
+    Claude Code reads CLAUDE.md from its working directory and every parent, so running
+    from the checkout loaded LORE's agent instructions into every extraction call. Not
+    under AppData: the lab PC's venv sits on the Microsoft Store Python, whose writes there
+    are redirected to a private copy that claude.exe cannot see ("Path ... does not exist").
+    """
+    path = Path(os.environ.get("KB_LLM_SANDBOX") or Path.home() / ".lore_kg_llm")
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+# One call that outlives this is hung: LightRAG's own worker timeout cancels the await but
+# leaves the process running, so it is killed here.
+LLM_CALL_TIMEOUT = int(os.environ.get("KB_LLM_TIMEOUT", "300"))
+
+
 async def _claude_code_llm_func(prompt, system_prompt=None, history_messages=None, **kwargs) -> str:
     """Build-time LLM = the Claude Code **plan** via headless ``claude -p`` (no API, no Ollama).
 
     Every entity/relation-extraction call is routed through the logged-in Claude Code plan,
     so the KG build costs no pay-per-token API. ANTHROPIC_API_KEY is scrubbed so the CLI
     uses the plan login (not the API), matching how the Slack listener spawns sessions.
-    Prompt goes in via stdin (no argv length limit).
+    Prompt goes in via stdin (no argv length limit). The call has no tools, MCP servers or
+    project instructions (``claude_text_only_args``, ``llm_sandbox_dir``).
     """
     import asyncio
+    import shutil
 
     parts: list[str] = []
     if system_prompt:
@@ -176,18 +213,28 @@ async def _claude_code_llm_func(prompt, system_prompt=None, history_messages=Non
 
     env = {k: v for k, v in os.environ.items()
            if k not in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")}
-    cmd = "claude -p --dangerously-skip-permissions"
-    model = os.environ.get("KB_BUILD_MODEL")
-    if model:
-        cmd += f" --model {model}"
-    proc = await asyncio.create_subprocess_shell(
-        cmd,
+    exe = shutil.which("claude")
+    if not exe:
+        raise RuntimeError("claude -p could not answer — the `claude` CLI is not on PATH.")
+    # Started directly, not through a shell, so killing it kills claude itself.
+    proc = await asyncio.create_subprocess_exec(
+        exe, *claude_text_only_args(os.environ.get("KB_BUILD_MODEL")),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        cwd=str(llm_sandbox_dir()),
     )
-    out, err = await proc.communicate(full.encode("utf-8"))
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(full.encode("utf-8")),
+                                          timeout=LLM_CALL_TIMEOUT)
+    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        if proc.returncode is None:
+            proc.kill()
+        if isinstance(exc, asyncio.TimeoutError):
+            raise RuntimeError(f"claude -p could not answer — no reply in {LLM_CALL_TIMEOUT} s; "
+                               "the call was killed.") from exc
+        raise
     text = out.decode("utf-8", errors="replace").strip()
     if not text:
         raise RuntimeError(f"claude -p returned nothing: {err.decode('utf-8', errors='replace')[:300]}")

@@ -119,6 +119,47 @@ def test_embedding_limit_is_read_from_the_model_not_hardcoded():
         assert bad not in src, f"hardcoded embedding window is back: {bad}"
 
 
+def test_the_graph_llm_is_text_only_and_outside_the_repo():
+    """The graph's LLM reads LabArchives page text, so it must not be an agent.
+
+    It ran with --dangerously-skip-permissions from the LORE checkout, which loaded
+    CLAUDE.md, skills and MCP servers, and once answered a query by running query_kb
+    itself. Page text that read like an instruction could have run a command.
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+
+    from lab_agent.config import PROJECT_ROOT
+    from lab_agent.rag import graph as g
+
+    args = g.claude_text_only_args("claude-sonnet-4-6")
+    assert "--dangerously-skip-permissions" not in args
+    assert args[args.index("--tools") + 1] == "", "tools must be disabled with --tools \"\""
+    assert "--strict-mcp-config" in args and "--mcp-config" not in args, "no MCP servers"
+    assert "--disable-slash-commands" in args and "--no-session-persistence" in args
+    assert args[-2:] == ["--model", "claude-sonnet-4-6"]
+    assert "--model" not in g.claude_text_only_args(None)
+
+    saved = os.environ.get("KB_LLM_SANDBOX")
+    try:
+        os.environ.pop("KB_LLM_SANDBOX", None)
+        default = g.llm_sandbox_dir().resolve()
+        root = Path(PROJECT_ROOT).resolve()
+        assert root not in default.parents and default != root, (
+            "the sandbox is inside the checkout, so LORE's CLAUDE.md would load")
+        assert "appdata" not in str(default).lower(), (
+            "Store Python redirects AppData writes; claude.exe would not find the folder")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ["KB_LLM_SANDBOX"] = str(Path(tmp) / "box")
+            assert g.llm_sandbox_dir() == Path(tmp) / "box" and (Path(tmp) / "box").is_dir()
+    finally:
+        if saved is None:
+            os.environ.pop("KB_LLM_SANDBOX", None)
+        else:
+            os.environ["KB_LLM_SANDBOX"] = saved
+
+
 if __name__ == "__main__":
     import sys
 
