@@ -83,11 +83,21 @@ def forget_session(thread_key: str) -> None:
             _save_session_map(session_map)
 
 
+def project_dir_name(path: str) -> str:
+    """The folder Claude Code keeps a directory's transcripts in, under ~/.claude/projects/.
+
+    Every character that is not a letter or digit becomes "-":
+    ``C:\\Users\\LC Control\\Desktop\\Lab-Agent-main\\LORE`` ->
+    ``C--Users-LC-Control-Desktop-Lab-Agent-main-LORE``. Replacing only "/" and "." left
+    a Windows path whole, so the lookup landed in LORE\\<id>.jsonl, and no thread on the
+    lab PC was ever resumed: 57 sessions, every follow-up starting from scratch.
+    """
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
 def _transcript_path(claude_session_id: str) -> Path:
-    # Claude Code stores transcripts under ~/.claude/projects/<munged-cwd>/,
-    # where the cwd is munged by replacing "/" and "." with "-".
-    munged = re.sub(r"[/.]", "-", str(PROJECT_ROOT))
-    return Path.home() / ".claude" / "projects" / munged / f"{claude_session_id}.jsonl"
+    return (Path.home() / ".claude" / "projects" / project_dir_name(str(PROJECT_ROOT))
+            / f"{claude_session_id}.jsonl")
 
 
 def resumable_session(thread_key: str) -> str | None:

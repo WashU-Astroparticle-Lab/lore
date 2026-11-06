@@ -68,6 +68,52 @@ def test_non_resume_failure_does_not_retry():
     assert posted and "ended unexpectedly" in posted[0], posted
 
 
+def test_transcript_folder_matches_claude_codes_naming():
+    # The real folders on the lab PC, next to the paths they belong to.
+    assert (s.project_dir_name(r"C:\Users\LC Control\Desktop\Lab-Agent-main\LORE")
+            == "C--Users-LC-Control-Desktop-Lab-Agent-main-LORE")
+    assert s.project_dir_name(r"C:\Users\LC Control") == "C--Users-LC-Control"
+    assert s.project_dir_name("/home/lab/lab_agent.v2/LORE") == "-home-lab-lab-agent-v2-LORE"
+
+
+def test_a_thread_with_a_transcript_is_resumed():
+    # Replacing only "/" and "." pointed the lookup at LORE\<id>.jsonl on Windows, so this
+    # returned None for every thread and all 57 sessions on the lab PC started fresh.
+    import json
+    import os
+    import re
+    import tempfile
+    from pathlib import Path
+
+    # Built here with Claude Code's own rule, not with project_dir_name: under the old
+    # rule the folder below collapsed onto the real LORE checkout.
+    name = re.sub(r"[^A-Za-z0-9]", "-", str(s.PROJECT_ROOT))
+    saved = {k: os.environ.get(k) for k in ("USERPROFILE", "HOME")}
+    saved_map = s.SESSION_MAP_PATH
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            os.environ["USERPROFILE"] = os.environ["HOME"] = tmp
+            folder = Path(tmp) / ".claude" / "projects" / name
+            assert str(folder).startswith(tmp), folder
+            folder.mkdir(parents=True)
+            (folder / "sess-1.jsonl").write_text("{}\n", encoding="utf-8")
+            s.SESSION_MAP_PATH = Path(tmp) / "session_map.json"
+            s.SESSION_MAP_PATH.write_text(json.dumps({
+                "111.22": {"claude_session_id": "sess-1", "updated_at": 1},
+                "333.44": {"claude_session_id": "sess-gone", "updated_at": 1},
+            }), encoding="utf-8")
+            assert s.resumable_session("111.22") == "sess-1", "a thread with a transcript must resume"
+            assert s.resumable_session("333.44") is None, "a missing transcript must start fresh"
+            assert s.resumable_session("999.99") is None
+        finally:
+            s.SESSION_MAP_PATH = saved_map
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
 if __name__ == "__main__":
     import sys
 
