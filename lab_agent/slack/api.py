@@ -185,15 +185,24 @@ def post_message_checked(channel: str, thread_ts: str | None, text: str) -> str:
 
 
 def message_exists(channel: str, ts: str) -> bool:
-    """Read a message back by ts — proof it is actually in the conversation."""
-    try:
-        body = api_get("conversations.history", {
-            "channel": channel, "latest": ts, "oldest": ts,
-            "inclusive": "true", "limit": "1",
-        })
-    except SlackError:
-        return False
-    return any(m.get("ts") == ts for m in body.get("messages", []))
+    """Read a message back by ts — proof it is actually in the conversation.
+
+    conversations.history lists only top-level messages, and LORE posts nearly everything
+    into a thread (every DM conversation is one). Checking history alone failed every
+    threaded post: "posted but could not read it back" on messages sitting in the thread,
+    in all 6 sessions on record that posted one. conversations.replies, given the reply's
+    own ts, finds it.
+    """
+    window = {"channel": channel, "latest": ts, "oldest": ts, "inclusive": "true", "limit": "1"}
+    for endpoint in ("conversations.history", "conversations.replies"):
+        params = dict(window, ts=ts) if endpoint == "conversations.replies" else window
+        try:
+            body = api_get(endpoint, params)
+        except SlackError:
+            continue
+        if any(m.get("ts") == ts for m in body.get("messages", [])):
+            return True
+    return False
 
 
 def upload_file(

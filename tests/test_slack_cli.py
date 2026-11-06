@@ -222,6 +222,61 @@ def test_file_is_shared_survives_the_indexing_race() -> None:
         restore()
 
 
+def _patch_urlopen_recording(bodies: list[dict], calls: list[str]):
+    """Like _patch_urlopen_sequence, and records each request's URL in *calls*."""
+    original = urllib.request.urlopen
+    queue = list(bodies)
+
+    def fake(req, *a, **k):
+        calls.append(req.full_url if hasattr(req, "full_url") else str(req))
+        return _FakeResponse(json.dumps(queue.pop(0)).encode())
+
+    urllib.request.urlopen = fake
+    return lambda: setattr(urllib.request, "urlopen", original)
+
+
+def test_message_exists_finds_a_thread_reply() -> None:
+    """conversations.history lists only top-level messages. LORE posts almost everything
+    into a thread, so a history-only check failed every threaded post: "posted (ts=…) but
+    could not read it back" on a message sitting in the thread, every time."""
+    ts = "1793660116.554349"
+    calls: list[str] = []
+    restore = _patch_urlopen_recording([
+        {"ok": True, "messages": []},                     # history: not top-level
+        {"ok": True, "messages": [{"ts": ts}]},           # replies: there it is
+    ], calls)
+    try:
+        check("a thread reply is read back", api.message_exists("D0TEST12345", ts) is True)
+        check("it was found with conversations.replies on its own ts",
+              len(calls) == 2 and "conversations.replies" in calls[1] and f"ts={ts}" in calls[1])
+    finally:
+        restore()
+
+    calls = []
+    restore = _patch_urlopen_recording([{"ok": True, "messages": [{"ts": ts}]}], calls)
+    try:
+        check("a top-level message is read back from history alone",
+              api.message_exists("C1", ts) is True and len(calls) == 1)
+    finally:
+        restore()
+
+    restore = _patch_urlopen_recording([{"ok": True, "messages": []},
+                                        {"ok": True, "messages": [{"ts": "1.0"}]}], [])
+    try:
+        check("a message in neither place is still reported missing",
+              api.message_exists("C1", ts) is False)
+    finally:
+        restore()
+
+    restore = _patch_urlopen_recording([{"ok": False, "error": "ratelimited"},
+                                        {"ok": True, "messages": [{"ts": ts}]}], [])
+    try:
+        check("a failed history call does not hide a reply that is there",
+              api.message_exists("C1", ts) is True)
+    finally:
+        restore()
+
+
 def test_dm_event_text() -> None:
     check("plain text wakes the bot", api.dm_event_text({"text": "hello"}) == "hello")
     check("bot echoes are ignored", api.dm_event_text({"text": "hi", "bot_id": "B1"}) is None)
@@ -254,5 +309,6 @@ if __name__ == "__main__":
     test_upload_rejects_empty_file()
     test_list_channels_falls_back_to_public()
     test_file_is_shared_survives_the_indexing_race()
+    test_message_exists_finds_a_thread_reply()
     test_dm_event_text()
     print(f"\ntest_slack_cli: {PASSED} checks passed")
