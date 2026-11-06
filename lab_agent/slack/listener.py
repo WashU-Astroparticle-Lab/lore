@@ -18,16 +18,18 @@ Setup:
     4. Install app to workspace → copy Bot User OAuth Token (xoxb-...)
     5. Add both tokens to .env
     6. Enable event subscriptions: app_mention, message.im
-    7. Run: python slack_listener.py
+    7. Run with the PYTHON from lab_config.md: "<PYTHON>" slack_listener.py
+       (it refuses to start on any other interpreter)
 """
 from __future__ import annotations
 
+import sys
 import threading
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-from ..config import PROJECT_ROOT
+from ..config import PROJECT_ROOT, wrong_interpreter
 from . import api
 from .sessions import (
     MAX_CONCURRENT,
@@ -100,6 +102,10 @@ def handle_dm(event, say, logger):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    problem = wrong_interpreter()
+    if problem:
+        print(f"[slack-listener] Not starting. {problem}", flush=True)
+        sys.exit(1)
     api.set_bot_user_id(api.fetch_bot_user_id())
     print(f"[slack-listener] Starting. Project root: {PROJECT_ROOT}")
     print(f"[slack-listener] Bot user ID: {api.BOT_USER_ID or '(unknown)'}")

@@ -178,6 +178,35 @@ def lab_config_value(key: str, default: str = "") -> str:
     return lab_config().get(key, default) or default
 
 
+def interpreter_problem(configured: str, prefix: str, executable: str) -> str | None:
+    """Why a process on ``executable`` (environment ``prefix``) is on the wrong Python.
+
+    ``configured`` is lab_config.md's PYTHON row. On the lab PC a bare ``python`` is the
+    Microsoft Store install, which has slack_bolt but not LightRAG, so a listener started
+    with it answers Slack with the knowledge-graph service down: every question runs
+    cold. That happened on 2026-10-20 and again on 2026-11-06. The environment is
+    compared, not the file name, so pythonw.exe from the right venv is fine. Returns None
+    when PYTHON is unset or still the template's placeholder.
+    """
+    if not configured or not Path(configured).is_absolute():
+        return None
+    exe = Path(configured)
+    env_root = exe.parent.parent if exe.parent.name.lower() in ("scripts", "bin") else exe.parent
+    if os.path.normcase(os.path.abspath(prefix)) == os.path.normcase(os.path.abspath(env_root)):
+        return None
+    return (f"This is {executable}, but lab_config.md says LORE runs on {configured}. "
+            "A bare `python` on this machine can be a different install without LORE's "
+            "packages, so the knowledge graph would not load and every question would run "
+            f"cold. Start it with:\n    \"{configured}\" slack_listener.py")
+
+
+def wrong_interpreter() -> str | None:
+    """``interpreter_problem`` for this process and this machine's lab_config.md."""
+    import sys
+
+    return interpreter_problem(lab_config_value("PYTHON"), sys.prefix, sys.executable)
+
+
 def dr_data_path() -> str:
     """Return DR_DATA_PATH from .env ('' if unset)."""
     load_env()

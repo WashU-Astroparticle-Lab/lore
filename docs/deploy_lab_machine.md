@@ -81,10 +81,14 @@ re-authenticate with `claude` before relying on Q&A.
 ### 7. Start the listener
 
 ```bash
-python slack_listener.py
+"<PYTHON from lab_config.md>" slack_listener.py
 ```
 
-The startup line mentioning the nightly KG refresh confirms new code is loaded.
+Use the interpreter in lab_config.md's PYTHON row, not a bare `python`. On the lab PC
+that resolves to the Microsoft Store install, which runs the listener with the
+knowledge-graph service off. The listener checks this and refuses to start, printing
+the command to use. The startup line mentioning the nightly KG refresh confirms new
+code is loaded.
 **Restart it after any change to `sessions.py` or `listener.py`** — CLAUDE.md and
 the skills are re-read per session, but the spawn prompt is baked into the
 running process.

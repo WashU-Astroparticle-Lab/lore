@@ -2,7 +2,7 @@
 slack_listener.py — Slack event listener for the lab-agent pipeline (shim).
 
 Usage:
-    python slack_listener.py
+    "<PYTHON from lab_config.md>" slack_listener.py   (it refuses any other interpreter)
 
 Implementation lives in lab_agent/slack/ (listener, history, sessions, api).
 """
