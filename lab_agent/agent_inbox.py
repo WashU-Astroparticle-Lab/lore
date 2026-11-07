@@ -84,6 +84,12 @@ def submit(title: str, markdown: str, run: str = "", caller: str = "") -> dict:
 
     nid = note_id(markdown, title)
     existing = read(nid)
+    if existing is not None and existing["state"] == "failed":
+        # A note that gave up can be sent again: it used to be "Already submitted" forever.
+        _requeue_failed(existing)
+        existing = read(nid)
+        existing["requeued"] = True
+        return existing
     if existing is not None:
         existing["duplicate"] = True
         return existing
@@ -99,33 +105,79 @@ def submit(title: str, markdown: str, run: str = "", caller: str = "") -> dict:
     pending.mkdir(parents=True, exist_ok=True)
     md, meta = _paths("pending", nid)
     md.write_text(markdown, encoding="utf-8")
-    meta.write_text(json.dumps(record, indent=1), encoding="utf-8")
+    _write_json(meta, record)
     record["state"] = "pending"
     return record
 
 
+def _write_json(path: Path, record: dict) -> None:
+    """Write a record atomically, so a reader never sees half a file."""
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({k: v for k, v in record.items() if k != "state"}, indent=1),
+                   encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def save_pending(record: dict) -> None:
+    """Persist a pending note's progress (which publishing steps are done)."""
+    _write_json(_paths("pending", record["id"])[1], record)
+
+
 def pending() -> list[tuple[dict, str]]:
-    """(record, markdown) for every note waiting, oldest first."""
+    """(record, markdown) for every note waiting, oldest first.
+
+    A record whose notes are gone is what an interrupted move leaves behind: if the note
+    reached published/ or failed/, the stray record is removed; otherwise it is skipped.
+    It used to raise FileNotFoundError on every pass, and no note was published again.
+    """
     folder = inbox() / "pending"
     out = []
     for meta in sorted(folder.glob("*.json")) if folder.is_dir() else []:
-        record = json.loads(meta.read_text(encoding="utf-8"))
-        out.append((record, meta.with_suffix(".md").read_text(encoding="utf-8")))
+        try:
+            record = json.loads(meta.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue  # being written, or unreadable: next pass
+        md = meta.with_suffix(".md")
+        if not md.exists():
+            if any(_paths(s, record.get("id", ""))[0].exists() for s in ("published", "failed")):
+                meta.unlink(missing_ok=True)
+            continue
+        out.append((record, md.read_text(encoding="utf-8")))
     return sorted(out, key=lambda rm: rm[0].get("submitted_at", ""))
 
 
 def _move(record: dict, to_state: str) -> None:
+    """Move a pending note to ``to_state``: record first, then notes, then the old record.
+
+    In that order an interruption at any point leaves a state pending() can finish, not
+    a record without its notes.
+    """
     src_md, src_meta = _paths("pending", record["id"])
     dst_md, dst_meta = _paths(to_state, record["id"])
     dst_meta.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(src_md, dst_md)
-    dst_meta.write_text(json.dumps(record, indent=1), encoding="utf-8")
+    _write_json(dst_meta, record)
+    if src_md.exists():
+        os.replace(src_md, dst_md)
+    src_meta.unlink(missing_ok=True)
+
+
+def _requeue_failed(record: dict) -> None:
+    src_md, src_meta = _paths("failed", record["id"])
+    dst_md, dst_meta = _paths("pending", record["id"])
+    dst_meta.parent.mkdir(parents=True, exist_ok=True)
+    fresh = {k: v for k, v in record.items()
+             if k not in ("state", "attempts", "last_error", "last_attempt_at")}
+    fresh.update(attempts=0, requeued_at=_now())
+    _write_json(dst_meta, fresh)
+    if src_md.exists():
+        os.replace(src_md, dst_md)
     src_meta.unlink(missing_ok=True)
 
 
 def mark_published(record: dict, where: dict) -> None:
-    record = dict(record, published_at=_now(), **where)
-    record.pop("last_error", None)
+    record = dict(record, published_at=record.get("published_at") or _now(), **where)
+    for k in ("last_error", "published_where", "page_title_pending"):
+        record.pop(k, None)
     _move(record, "published")
 
 
@@ -136,8 +188,7 @@ def mark_failed_attempt(record: dict, error: str) -> str:
     if record["attempts"] >= MAX_ATTEMPTS:
         _move(record, "failed")
         return "failed"
-    _, meta = _paths("pending", record["id"])
-    meta.write_text(json.dumps(record, indent=1), encoding="utf-8")
+    save_pending(record)
     return "pending"
 
 

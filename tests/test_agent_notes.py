@@ -109,6 +109,127 @@ def test_the_page_says_who_wrote_it_and_cannot_carry_html():
     assert agent_notes.page_title(record) == "[UNSIGNED] Agent notes 2026-09-25 02:10 — night 1"
 
 
+def test_code_is_not_double_escaped_and_links_and_images_are_defused():
+    record = {"id": "note-0123456789ab", "title": "t", "submitted_at": "2026-09-25T02:10:00"}
+    notes = ("Cut at `Qi < 1e5 & Qc > 1e4`.\n\n```\nif a < b && c:\n```\n\n"
+             "[click](javascript:alert(1)) [docs](https://example.org) ![plot](http://ext/i.png?d=x)")
+    html = agent_notes.render(record, notes)
+    assert "<code>Qi &lt; 1e5 &amp; Qc &gt; 1e4</code>" in html, html
+    assert "&amp;lt;" not in html and "&amp;amp;" not in html, "code was escaped twice"
+    assert "javascript:" not in html and 'href="https://example.org"' in html
+    assert "<img" not in html and "[image: plot]" in html
+
+
+def _fake_la(calls, fail_attachment_times=0):
+    """A stand-in for the LabArchives calls publish_note makes, failing the attachment n times."""
+    left = {"n": fail_attachment_times}
+
+    class LA:
+        @staticmethod
+        def _get_adapter():
+            return None
+
+        @staticmethod
+        def _find_upload_folder(adapter):
+            return "NB", "FOLDER"
+
+        @staticmethod
+        def _insert_page(nbid, folder, title):
+            calls.append("page")
+            return f"PAGE{len([c for c in calls if c == 'page'])}"
+
+        @staticmethod
+        def _add_text_entry(nbid, page, html):
+            calls.append(("text", page))
+
+        @staticmethod
+        def _add_attachment(nbid, page, path):
+            if left["n"] > 0:
+                left["n"] -= 1
+                raise TimeoutError("LabArchives 30 s timeout")
+            calls.append(("attachment", page))
+
+        _upload_folder_name = staticmethod(lambda: "AI Agent")
+        _target_notebook_name = staticmethod(lambda: "Qubit & KID")
+        _notebook_url = staticmethod(lambda nbid: "https://example/nb")
+
+    return LA
+
+
+def test_a_retry_finishes_the_same_page_instead_of_making_another():
+    calls: list = []
+    saved = agent_notes.la
+    with _inbox():
+        agent_notes.la = _fake_la(calls, fail_attachment_times=1)
+        try:
+            r = agent_inbox.submit("night 1", NOTES)
+            agent_notes.process_inbox()                      # page + text, attachment times out
+            rec = agent_inbox.read(r["id"])
+            rec["last_attempt_at"] = (datetime.now() - timedelta(hours=1)).isoformat()
+            agent_inbox.save_pending(rec)
+            agent_notes.process_inbox()                      # retry: attachment only
+        finally:
+            agent_notes.la = saved
+        assert calls.count("page") == 1, f"a retry created another page: {calls}"
+        assert calls.count(("text", "PAGE1")) == 1 and ("attachment", "PAGE1") in calls, calls
+        assert agent_inbox.read(r["id"])["state"] == "published"
+
+
+def test_an_interrupted_move_is_finished_not_republished():
+    published = []
+
+    def fake_publish(record, markdown):
+        published.append(record["id"])
+        return {"page_title": "p", "folder": "AI Agent", "notebook": "nb", "notebook_url": "u"}
+
+    with _inbox() as box:
+        r = agent_inbox.submit("night 1", NOTES)
+        saved_move = agent_inbox._move
+
+        def broken_move(*a, **k):
+            raise PermissionError("[WinError 32] being used by another process")
+
+        agent_inbox._move = broken_move
+        try:
+            lines = agent_notes.process_inbox(publish=fake_publish)
+        finally:
+            agent_inbox._move = saved_move
+        assert "retried next pass" in lines[0], lines
+        agent_notes.process_inbox(publish=fake_publish)
+        assert published == [r["id"]], "the note was published twice"
+        assert agent_inbox.read(r["id"])["state"] == "published"
+        # A record left without its notes (the move got halfway) must not stall the queue.
+        (box / "pending").mkdir(exist_ok=True)
+        (box / "pending" / f"{r['id']}.json").write_text(json.dumps({"id": r["id"]}))
+        assert agent_inbox.pending() == []
+        assert not (box / "pending" / f"{r['id']}.json").exists(), "the stray record stays"
+
+
+def test_a_looping_agent_cannot_publish_everything_at_once():
+    published = []
+
+    def fake_publish(record, markdown):
+        published.append(record["id"])
+        return {"page_title": "p", "folder": "f", "notebook": "n", "notebook_url": "u"}
+
+    with _inbox():
+        for i in range(10):
+            agent_inbox.submit(f"note {i}", f"{NOTES}\n{i}")
+        agent_notes.process_inbox(publish=fake_publish)
+        assert len(published) == agent_notes.MAX_PER_PASS, published
+
+
+def test_a_failed_note_can_be_sent_again():
+    with _inbox():
+        r = agent_inbox.submit("night 1", NOTES)
+        rec = agent_inbox.read(r["id"])
+        rec["attempts"] = agent_inbox.MAX_ATTEMPTS - 1
+        agent_inbox.mark_failed_attempt(rec, "LabArchives down")
+        assert agent_inbox.read(r["id"])["state"] == "failed"
+        again = agent_inbox.submit("night 1", NOTES)
+        assert again.get("requeued") and again["state"] == "pending" and again["attempts"] == 0
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):
