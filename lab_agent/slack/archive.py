@@ -293,11 +293,17 @@ class Discussion:
         return float(self.seeds[0]["ts"])
 
     def messages(self) -> list[dict]:
-        """Every message, replies right after their parent."""
-        out = []
+        """Every message once, replies right after their parent.
+
+        A reply also sent to the channel comes back twice: in its thread and in the
+        channel's history. On 2026-10-31 that put two figures on the page twice.
+        """
+        out, seen = [], set()
         for rec in self.context:
-            out.append(rec)
-            out += rec.get("replies", [])
+            for m in [rec] + rec.get("replies", []):
+                if m["ts"] not in seen:
+                    seen.add(m["ts"])
+                    out.append(m)
         return out
 
     @property
@@ -403,9 +409,12 @@ def transcript(d: Discussion, names: dict[str, str]) -> str:
         labels.setdefault(uid, f"Member {chr(ord('A') + len(labels) % 26)}")
         return labels[uid]
 
-    lines, n = [], 0
+    lines, n, seen = [], 0, set()
     for rec in d.context:
         for m, indent in [(rec, "")] + [(r, "    reply ") for r in rec.get("replies", [])]:
+            if m["ts"] in seen:                  # a reply also sent to the channel
+                continue
+            seen.add(m["ts"])
             figs = []
             for f in m.get("files", []):
                 if _is_image(f):

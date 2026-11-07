@@ -326,6 +326,25 @@ def test_a_discussion_stops_at_the_next_ones_figure():
     assert [r["text"] for r in b.context] == ["second figure", "more"], b.context
 
 
+def test_a_reply_also_sent_to_the_channel_is_counted_once():
+    def rec(m, text, fid, replies=()):
+        return {"ts": f"{T0 + m * 60:.6f}", "user": "U1", "text": text, "reactions": [],
+                "bot": False, "replies": list(replies),
+                "files": [{"id": fid, "name": "p.png", "mimetype": "image/png"}]}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for fid in ("F1", "F2"):
+            png(root / f"{fid}.png")
+        reply = rec(5, "the baseline after the fix", "F2")
+        recs = [rec(0, "baseline before", "F1", [reply]), dict(reply)]
+        for r in recs + [reply]:
+            r["files"][0]["path"] = f"{r['files'][0]['id']}.png"
+        (d,) = A.group("c", recs)
+        assert [f["id"] for _, f, _ in d.image_files(root)] == ["F1", "F2"]
+        assert A.transcript(d, {}).count("the baseline after the fix") == 1
+
+
 def test_an_api_posted_image_is_kept_out_of_the_figure_manifest():
     from lab_agent.sources.labarchives.images import extract_embedded_img_urls
 
