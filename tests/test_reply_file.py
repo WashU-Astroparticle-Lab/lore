@@ -124,19 +124,19 @@ class _Done:
 
 def test_the_reaper_posts_the_file_and_deletes_it():
     posted = []
-    saved = (sessions._bot_posts_since, sessions.api.post_message,
+    saved = (sessions._bot_posts_since, sessions.api.post_message_checked,
              list(sessions._active_sessions))
     with tempfile.TemporaryDirectory() as d:
         s = _slot(Path(d), ANSWER, LEAD_IN_AND_LATE_TURN)
         s.update(proc=_Done(), user="U1", channel="D1", thread_ts="1.0",
                  started_at=time.time(), timed_out=False, thread_key="1.0")
         sessions._bot_posts_since = lambda *a: []
-        sessions.api.post_message = lambda ch, ts, text: posted.append(text)
+        sessions.api.post_message_checked = lambda ch, ts, text: posted.append(text) or "9.9"
         sessions._active_sessions[:] = [s]
         try:
             sessions.reap_finished()
         finally:
-            sessions._bot_posts_since, sessions.api.post_message = saved[0], saved[1]
+            sessions._bot_posts_since, sessions.api.post_message_checked = saved[0], saved[1]
             sessions._active_sessions[:] = saved[2]
         assert posted == [ANSWER], posted
         assert not s["reply_file"].exists(), "reply files must not pile up"

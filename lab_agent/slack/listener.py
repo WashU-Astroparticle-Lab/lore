@@ -37,7 +37,8 @@ from .sessions import (
     SESSION_TIMEOUT,
     acknowledgement,
     agent_notes_loop,
-    is_ack,
+    claim_ack,
+    ignorable_ack,
     kg_refresh_hour,
     kg_refresh_loop,
     reaper_loop,
@@ -58,14 +59,19 @@ def handle_mention(event, say, logger):
     current_ts  = event["ts"]
     thread_ts   = event.get("thread_ts")   # None if this is the thread parent
 
+    # An @mention in a DM also arrives as a message.im event, which handle_dm owns. When
+    # this handler won the race the session ran as a channel one: no "thinking" status.
+    if channel.startswith("D"):
+        return
+
     logger.info(f"Mention from {user}: {text!r}")
 
-    if is_ack(text):
+    if ignorable_ack(text, channel, thread_ts, current_ts):
         logger.info(f"Ignoring acknowledgment from {user}")
         return
 
     ack = acknowledgement(text)
-    if ack:
+    if ack and claim_ack(current_ts):
         say(text=f"<@{user}> {ack}", thread_ts=thread_ts or current_ts)
 
     spawn_claude(user, text, channel, thread_ts, current_ts)
@@ -88,12 +94,12 @@ def handle_dm(event, say, logger):
 
     logger.info(f"DM from {user}: {text!r}")
 
-    if is_ack(text):
+    if ignorable_ack(text, channel, thread_ts, current_ts):
         logger.info(f"Ignoring acknowledgment from {user}")
         return
 
     ack = acknowledgement(text)
-    if ack:
+    if ack and claim_ack(current_ts):
         api.post_message(channel, thread_ts or current_ts, ack)
 
     spawn_claude(user, text, channel, thread_ts, current_ts, is_dm=True)

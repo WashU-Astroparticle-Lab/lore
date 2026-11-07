@@ -19,7 +19,7 @@ from pathlib import Path
 
 from ..config import PROJECT_ROOT, load_env
 from . import api
-from .history import fetch_history
+from .history import bot_asked_last, fetch_history, fetch_thread_since
 
 # ── Session tracker ───────────────────────────────────────────────────────────
 
@@ -33,6 +33,17 @@ _sessions_lock   = threading.Lock()
 # Requests to re-spawn as a FRESH session after a resume failed. Filled under the lock by the
 # reaper; drained outside the lock (spawn_claude re-acquires it) so there is no deadlock.
 _pending_retries: list[dict] = []
+# Requests that could not start yet: their thread already had a session running, or the
+# user or the listener was at its cap. They used to be dropped, one of them after "I'll
+# reply when it finishes", which nothing kept. The reaper starts them once there is room.
+_waiting: list[dict] = []
+MAX_WAITING = 20
+# A session that finds a message already dealt with writes this as its reply: nothing posts.
+NO_REPLY = "(no reply)"
+# A resumed session that fails sooner than this most likely could not be resumed at all, so
+# it is re-run fresh. One that fails later had been working: re-running it from scratch could
+# repeat an upload, so it gets the normal error instead.
+RESUME_FAILED_FAST_S = 120
 
 
 # ── Claude session persistence (thread_ts → Claude Code session UUID) ─────────
@@ -100,6 +111,13 @@ def _transcript_path(claude_session_id: str) -> Path:
             / f"{claude_session_id}.jsonl")
 
 
+def last_turn_at(thread_key: str) -> float | None:
+    """When the thread's previous session started (epoch s), or None if it has none."""
+    with _session_map_lock:
+        entry = _load_session_map().get(thread_key)
+    return float(entry["updated_at"]) if entry and entry.get("updated_at") else None
+
+
 def resumable_session(thread_key: str) -> str | None:
     """Return the stored Claude session ID if its transcript still exists."""
     with _session_map_lock:
@@ -144,11 +162,54 @@ def duplicates_earlier_post(body: str, earlier: list[str]) -> bool:
 
 
 def _bot_posts_since(channel: str, thread_ts: str, since: float) -> list[str]:
-    """Texts the bot posted in the thread after ``since`` (epoch seconds)."""
+    """Texts the bot posted in the thread after ``since`` (epoch seconds).
+
+    Slack returns a thread's parent whatever ``oldest`` says, so the time is checked here.
+    Without that, a revised summary posted under the bot's own channel summary was compared
+    with that summary, judged a duplicate, and never posted.
+    """
     body = api.api_get("conversations.replies", {
         "channel": channel, "ts": thread_ts, "oldest": f"{since:.6f}", "limit": "100"})
     return [m.get("text", "") for m in body.get("messages", [])
-            if (api.BOT_USER_ID and m.get("user") == api.BOT_USER_ID) or m.get("bot_id")]
+            if float(m.get("ts") or 0) >= since
+            and ((api.BOT_USER_ID and m.get("user") == api.BOT_USER_ID) or m.get("bot_id"))]
+
+
+# Slack rejects a message over 40,000 characters; split well under that, at paragraphs.
+SLACK_CHUNK = 35_000
+POST_ATTEMPTS = 3
+
+
+def split_for_slack(text: str, limit: int = SLACK_CHUNK) -> list[str]:
+    """``text`` in pieces Slack accepts, split at paragraph breaks where possible."""
+    chunks, rest = [], text
+    while len(rest) > limit:
+        cut = rest.rfind("\n\n", 0, limit)
+        cut = cut if cut > limit // 2 else limit
+        chunks.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip("\n")
+    return chunks + ([rest] if rest.strip() else [])
+
+
+def _post_final(channel: str, thread_ts: str, body: str) -> bool:
+    """Post a session's answer, retrying a failed post. True once every piece is in.
+
+    It used to be a single fire-and-forget post: one 429 or timeout and an answer that took
+    twenty minutes was gone, its reply file deleted a moment later.
+    """
+    for piece in split_for_slack(body):
+        for attempt in range(1, POST_ATTEMPTS + 1):
+            try:
+                api.post_message_checked(channel, thread_ts, piece)
+                break
+            except api.SlackError as exc:
+                print(f"[session-done] post attempt {attempt}/{POST_ATTEMPTS} failed: {exc}",
+                      flush=True)
+                if attempt < POST_ATTEMPTS:
+                    time.sleep(attempt)
+        else:
+            return False
+    return True
 
 
 def _deliver_final_output(s: dict, body: str) -> None:
@@ -165,7 +226,16 @@ def _deliver_final_output(s: dict, body: str) -> None:
         if s.get("progress") == "status":
             _set_status(s, "")   # no post follows to clear it
         return
-    api.post_message(s["channel"], s["thread_ts"], body)
+    if not _post_final(s["channel"], s["thread_ts"], body):
+        kept = PROJECT_ROOT / "session_logs" / f"undelivered_{s['session_id']}.md"
+        try:
+            kept.write_text(body, encoding="utf-8")
+        except OSError:
+            kept = None
+        print(f"[session-done] session={s['session_id']} could not post its answer; "
+              f"kept in {kept}", flush=True)
+        if s.get("progress") == "status":
+            _set_status(s, "")
 
 
 # ── The reply file ────────────────────────────────────────────────────────────
@@ -230,16 +300,27 @@ def clean_stdout_reply(text: str) -> str:
     return cleaned or text.strip()
 
 
-def _reply_body(s: dict) -> str:
-    """What to post for a finished session: its reply file, else its stdout, cleaned."""
+def _reply_file_text(s: dict) -> str:
+    """The session's reply file, stripped; "" if it wrote none."""
     reply_file = s.get("reply_file")
-    if reply_file:
-        try:
-            text = Path(reply_file).read_text(encoding="utf-8", errors="replace").strip()
-        except OSError:
-            text = ""
-        if text:
-            return text
+    if not reply_file:
+        return ""
+    try:
+        return Path(reply_file).read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+
+
+def _reply_body(s: dict) -> str:
+    """What to post for a finished session: its reply file, else its stdout, cleaned.
+
+    A reply file holding only NO_REPLY means the session decided nothing needs saying.
+    """
+    text = _reply_file_text(s)
+    if text == NO_REPLY:
+        return ""
+    if text:
+        return text
     log_path = s.get("session_log")
     if not log_path or not Path(log_path).exists():
         return ""
@@ -251,6 +332,26 @@ def _reply_body(s: dict) -> str:
     return clean_stdout_reply(raw) if raw else ""
 
 
+def _kill_tree(proc) -> None:
+    """End a session and everything it started.
+
+    The session runs as ``cmd /c claude ...`` (shell=True), and on Windows ``proc.kill()``
+    ends only cmd.exe. claude.exe carried on: still using the plan, able to post or upload,
+    its answer never delivered, and resumable by the next message while still writing the
+    same transcript.
+    """
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30)
+        except Exception as exc:  # noqa: BLE001 — fall through to the plain kill
+            print(f"[session-timeout] taskkill failed ({exc})", flush=True)
+    try:
+        proc.kill()
+    except Exception:  # noqa: BLE001 — already gone
+        pass
+
+
 def _reap_nolock() -> None:
     """Reap finished/timed-out sessions. Caller must hold _sessions_lock."""
     now = time.time()
@@ -259,7 +360,7 @@ def _reap_nolock() -> None:
             continue  # placeholder not yet filled
         elapsed = now - s["started_at"]
         if elapsed > SESSION_TIMEOUT and s["proc"].poll() is None:
-            s["proc"].kill()
+            _kill_tree(s["proc"])
             s["timed_out"] = True
             print(f"[session-timeout] user={s['user']} session={s['session_id']} "
                   f"killed after {round(elapsed)}s", flush=True)
@@ -272,12 +373,22 @@ def _reap_nolock() -> None:
             print(f"[session-done] user={s['user']} session={s['session_id']} "
                   f"elapsed={elapsed_r}s exit={exit_code}", flush=True)
             log_path = s.get("session_log")
+            written = _reply_file_text(s)
             if exit_code == 0:
                 # Deliver the session's reply (its reply file; stdout as a fallback). The
                 # listener posts it so the session doesn't need to post its answer itself.
                 body = _reply_body(s)
                 if body:
                     _deliver_final_output(s, body)
+                elif s.get("progress") == "status":
+                    _set_status(s, "")   # nothing to post, so nothing would clear it
+            elif written and not s.get("timed_out"):
+                # It wrote its answer and then failed, e.g. on a late background-task turn.
+                # The answer is still the answer; it used to be deleted unposted.
+                print(f"[session-done] session={s['session_id']} exited {exit_code} after "
+                      "writing its reply; posting the reply.", flush=True)
+                if written != NO_REPLY:
+                    _deliver_final_output(s, written)
             elif not s.get("timed_out"):
                 tail = read_log_tail(log_path) if log_path else ""
                 limit_keywords = ("hit your limit", "rate limit", "usage limit",
@@ -286,9 +397,10 @@ def _reap_nolock() -> None:
                     api.post_message(s["channel"], s["thread_ts"],
                         f"<@{s['user']}> I hit the daily token limit mid-pipeline and stopped. "
                         "The report is incomplete — try again after your limit resets.")
-                elif s.get("resume_of") and s.get("user_text"):
-                    # A RESUMED session failed (the stored Claude session often can't be
-                    # resumed after a listener restart / expiry, dying before it writes any
+                elif (s.get("resume_of") and s.get("user_text")
+                      and now - s["started_at"] < RESUME_FAILED_FAST_S):
+                    # A RESUMED session failed at once (the stored Claude session often can't
+                    # be resumed after a listener restart / expiry, dying before it writes any
                     # useful log). Don't surface a cryptic error — drop the mapping and
                     # transparently re-run the SAME request as a FRESH session. The retry
                     # has resume_of=None, so if it also fails it falls through to the normal
@@ -324,17 +436,33 @@ def _reap_nolock() -> None:
             _seen_timestamps.discard(ts)
 
 
+def _can_start(spec: dict) -> bool:
+    """Whether a waiting request would pass _launch's checks now. Caller holds the lock."""
+    return (not any(s.get("thread_key") == spec["thread_key"] for s in _active_sessions)
+            and sum(1 for s in _active_sessions if s["user"] == spec["user"]) < MAX_PER_USER
+            and len(_active_sessions) < MAX_CONCURRENT)
+
+
 def _drain_retries() -> None:
-    """Spawn any queued fresh-session retries OUTSIDE the lock (spawn_claude re-locks)."""
+    """Spawn queued retries and waiting requests OUTSIDE the lock (spawn_claude re-locks)."""
     while True:
         with _sessions_lock:
-            if not _pending_retries:
-                return
-            spec = _pending_retries.pop(0)
+            if _pending_retries:
+                spec, kind = _pending_retries.pop(0), "retry"
+            else:
+                ready = next((w for w in _waiting if _can_start(w)), None)
+                if ready is None:
+                    return
+                _waiting.remove(ready)
+                _seen_timestamps.discard(ready["current_ts"])
+                spec = {k: v for k, v in ready.items() if k != "thread_key"}
+                spec["requeued"] = True
+                kind = "waiting"
         try:
             spawn_claude(**spec)
         except Exception as exc:  # noqa: BLE001 — a bad retry must not kill the reaper
-            print(f"[resume-fallback] retry spawn failed: {exc}", flush=True)
+            print(f"[{'resume-fallback' if kind == 'retry' else 'queue'}] spawn failed: {exc}",
+                  flush=True)
 
 
 def reap_finished() -> None:
@@ -500,6 +628,34 @@ def is_ack(text: str) -> bool:
     return len(words) <= 6 and text.strip().lower().rstrip("!.,") in ack_phrases
 
 
+def ignorable_ack(text: str, channel: str, thread_ts: str | None, current_ts: str) -> bool:
+    """An "ok"/"thanks" that needs no answer: one after an answer, not after a question.
+
+    is_ack alone dropped "Sure!" sent in reply to "Send this to #x, or tell me what to
+    change?", so the approved message was never sent and the user heard nothing back.
+    """
+    return is_ack(text) and not bot_asked_last(channel, thread_ts, current_ts)
+
+
+_acked: set[str] = set()
+
+
+def claim_ack(ts: str) -> bool:
+    """True the first time a message ts asks for an instant ack, False after.
+
+    The listener acks before _launch dedups, so a DM @mention (which fires two events) or a
+    redelivered event got "On it" twice.
+    """
+    with _sessions_lock:
+        if ts in _acked:
+            return False
+        _acked.add(ts)
+        if len(_acked) > 500:
+            for old in sorted(_acked)[:250]:
+                _acked.discard(old)
+        return True
+
+
 def acknowledgement(text: str) -> str | None:
     """The message to post the instant a request arrives, or None.
 
@@ -574,8 +730,15 @@ def spawn_claude(
     thread_ts: str | None,
     current_ts: str,
     is_dm: bool = False,
+    arrived_while_busy: bool = False,
+    requeued: bool = False,
 ) -> None:
-    """Spawn a Claude Code session to handle the request."""
+    """Spawn a Claude Code session to handle the request.
+
+    ``arrived_while_busy``: the message came in while an earlier session was working in the
+    same thread, and waited for it. ``requeued``: this is that waiting request starting now,
+    so a cap it meets again queues it without another notice.
+    """
     session_id = uuid.uuid4().hex[:8]
 
     if is_dm:
@@ -597,14 +760,30 @@ def spawn_claude(
     thread_key = str(reply_ts)
     resume_id = resumable_session(thread_key)
     reply_file = reply_path(session_id)
+    busy_note = (
+        f"This message arrived while you were still working on your previous turn in this "
+        f"thread, and waited for it to finish. If that turn already used or answered it, "
+        f"write exactly {NO_REPLY} as the reply file and nothing will be posted."
+        if arrived_while_busy else "")
 
     if resume_id:
+        # The resumed session remembers its own turns, not what others said in between: a
+        # colleague's reply in a channel thread wakes nobody, and a message that waited for
+        # the previous turn is not in its transcript. Before resuming worked, every follow-up
+        # re-read the whole thread, so this is what keeps that context.
+        since = last_turn_at(thread_key)
+        missed = (fetch_thread_since(channel, reply_ts, since, current_ts) if since
+                  else "") or "(none)"
         prompt = textwrap.dedent(f"""
             (Resumed Slack session — you already have the full context of this conversation
             and any pipeline work you completed earlier. Trust it; do not re-derive state.)
 
+            Messages posted in this thread by others since your last turn, oldest first:
+            {missed}
+
             Latest message from <@{user}>: {text}
             Reply-to      : {reply_to_str}
+            {busy_note}
 
             Continue from wherever you left off. Never repeat completed steps — if run.py
             outputs or extracted_*.md files already exist, do not regenerate them.
@@ -625,7 +804,8 @@ def spawn_claude(
         """).strip()
         return _launch(user, channel, reply_ts, current_ts, prompt, resume_id=resume_id,
                        thread_key=thread_key, session_id=session_id, orig_thread_ts=thread_ts,
-                       user_text=text, is_dm=is_dm)
+                       user_text=text, is_dm=is_dm, arrived_while_busy=arrived_while_busy,
+                       requeued=requeued)
 
     history_str = fetch_history(channel, thread_ts, current_ts)
 
@@ -641,6 +821,7 @@ def spawn_claude(
         Latest message: {text}
         Reply-to      : {reply_to_str}
         Project root  : {PROJECT_ROOT}
+        {busy_note}
 
         {history_label} (empty means this is a new conversation):
         {history_str}
@@ -695,7 +876,8 @@ def spawn_claude(
 
     _launch(user, channel, reply_ts, current_ts, prompt, resume_id=None,
             thread_key=thread_key, session_id=session_id, orig_thread_ts=thread_ts,
-            user_text=text, is_dm=is_dm)
+            user_text=text, is_dm=is_dm, arrived_while_busy=arrived_while_busy,
+            requeued=requeued)
 
 
 def _launch(
@@ -711,6 +893,8 @@ def _launch(
     orig_thread_ts: str | None = None,
     user_text: str = "",
     is_dm: bool = False,
+    arrived_while_busy: bool = False,
+    requeued: bool = False,
 ) -> None:
     """Reserve a session slot and spawn the claude process (fresh or resumed).
 
@@ -733,29 +917,40 @@ def _launch(
             return
         _seen_timestamps.add(current_ts)
 
-        # A session for this same thread is still running — stay silent. The
-        # running session polls the thread for replies (that is how the DR
-        # answer arrives mid-pipeline), so a notice here would just be noise.
+        # Busy thread or a cap: wait for room instead of dropping the message. A message
+        # sent while its thread's session ran was dropped on the theory that the session
+        # polls the thread, which only the report pipeline does, once. It waits in silence
+        # (the running session may yet read it) and is told it may already be answered.
+        def wait(note: str | None, busy: bool) -> None:
+            if len(_waiting) >= MAX_WAITING:
+                api.post_message(channel, reply_ts, f"<@{user}> I'm too backed up to take this "
+                                 "right now. Please send it again in a few minutes.")
+                print(f"[queue] full; rejected {user} ts={current_ts}", flush=True)
+                return
+            _waiting.append({"user": user, "text": user_text, "channel": channel,
+                             "thread_ts": orig_thread_ts, "current_ts": current_ts,
+                             "is_dm": is_dm, "thread_key": thread_key,
+                             "arrived_while_busy": busy or arrived_while_busy})
+            if note and not requeued:
+                api.post_message(channel, reply_ts, f"<@{user}> {note}")
+            print(f"[queue] {user} ts={current_ts} waits ({len(_waiting)} waiting)", flush=True)
+
         if any(s.get("thread_key") == thread_key for s in _active_sessions):
-            print(f"[session-skip] Thread {thread_key} already has an active session; "
-                  "the reply will be picked up by the running session.", flush=True)
+            wait(None, busy=True)
             return
 
         # Global cap
         active_count = len(_active_sessions)
         if active_count >= MAX_CONCURRENT:
-            api.post_message(channel, reply_ts,
-                             f"<@{user}> Sorry, {active_count} session(s) are already running. "
-                             "Please wait a few minutes and try again.")
-            print(f"[session-limit] Rejected {user} — {active_count} active (global cap)", flush=True)
+            wait(f"{active_count} requests are already running; I'll start yours as soon as "
+                 "one finishes.", busy=False)
             return
 
         # Per-user cap
         user_count = sum(1 for s in _active_sessions if s["user"] == user)
         if user_count >= MAX_PER_USER:
-            api.post_message(channel, reply_ts,
-                             f"<@{user}> You already have a session running — I'll reply when it finishes.")
-            print(f"[session-limit] Rejected {user} — already has an active session", flush=True)
+            wait("You already have a request running; I'll start this one as soon as it "
+                 "finishes.", busy=False)
             return
 
         # Reserve the slot immediately so concurrent events see it before proc starts
@@ -781,6 +976,33 @@ def _launch(
         _active_sessions.append(slot)
 
     # ── Spawn outside lock ────────────────────────────────────────────────────
+    # If anything here raises, give the slot back. A reserved slot with no process was
+    # skipped by the reaper forever: that thread and user stayed "busy" until a restart.
+    try:
+        _spawn_into(slot, prompt, user=user, channel=channel, session_id=session_id,
+                    resume_id=resume_id)
+    except Exception as exc:  # noqa: BLE001
+        with _sessions_lock:
+            if slot in _active_sessions:
+                _active_sessions.remove(slot)
+            _seen_timestamps.discard(current_ts)
+        print(f"[session-start] could not start a session for {user}: {exc}", flush=True)
+        api.post_message(channel, reply_ts, f"<@{user}> I couldn't start working on that "
+                         f"({type(exc).__name__}). Please send it again.")
+        return
+    try:
+        remember_session(thread_key, slot["claude_session_id"])
+    except Exception as exc:  # noqa: BLE001 — the session runs; only resuming it is lost
+        print(f"[session-start] could not record session for resume: {exc}", flush=True)
+
+    print(f"[session-start] user={user} session={session_id} pid={slot['proc'].pid} "
+          f"resumed={bool(resume_id)} active={len(_active_sessions)}", flush=True)
+    _progress_tick()   # sets the DM "thinking" status now, not at the next reaper pass
+
+
+def _spawn_into(slot: dict, prompt: str, *, user: str, channel: str, session_id: str,
+                resume_id: str | None) -> None:
+    """Write the prompt, start claude, and fill the reserved slot."""
     logs_dir = PROJECT_ROOT / "session_logs"
     logs_dir.mkdir(exist_ok=True)
     session_log = logs_dir / f"session_{session_id}_{user}.log"
@@ -822,16 +1044,11 @@ def _launch(
             env=child_env,
         )
 
-    remember_session(thread_key, claude_session_id)
-
-    # Fill in the slot now that we have the real proc
+    # Fill in the slot the moment the process exists, so nothing later can strand it.
     slot["proc"]        = proc
     slot["session_log"] = session_log
     slot["prompt_file"] = prompt_file
-
-    print(f"[session-start] user={user} session={session_id} pid={proc.pid} "
-          f"resumed={bool(resume_id)} active={len(_active_sessions)}", flush=True)
-    _progress_tick()   # sets the DM "thinking" status now, not at the next reaper pass
+    slot["claude_session_id"] = claude_session_id
     # Reap the moment the session exits. Waiting for the 30 s reaper pass held every
     # reply back by up to 30 s — a greeting answered in 8 s showed up seconds later.
     threading.Thread(target=_reap_on_exit, args=(proc,), daemon=True).start()

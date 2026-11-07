@@ -53,33 +53,33 @@ def test_short_outputs_are_never_judged_duplicates():
 
 def test_if_the_thread_cannot_be_read_the_answer_is_posted_anyway():
     posted = []
-    saved = (sessions._bot_posts_since, sessions.api.post_message)
+    saved = (sessions._bot_posts_since, sessions.api.post_message_checked)
 
     def unreadable(*a, **k):
         raise RuntimeError("conversations.replies: transport error")
 
     sessions._bot_posts_since = unreadable
-    sessions.api.post_message = lambda ch, ts, text: posted.append(text)
+    sessions.api.post_message_checked = lambda ch, ts, text: posted.append(text) or "1.1"
     try:
         sessions._deliver_final_output(
             {"channel": "D1", "thread_ts": "1.0", "started_at": 0.0, "session_id": "x"},
             FINAL_OUTPUT)
     finally:
-        sessions._bot_posts_since, sessions.api.post_message = saved
+        sessions._bot_posts_since, sessions.api.post_message_checked = saved
     assert posted == [FINAL_OUTPUT], "a failed check must not swallow the reply"
 
 
 def test_a_duplicate_is_not_reposted_through_the_reaper_path():
     posted = []
-    saved = (sessions._bot_posts_since, sessions.api.post_message)
+    saved = (sessions._bot_posts_since, sessions.api.post_message_checked)
     sessions._bot_posts_since = lambda *a: [ACK, POSTED_BY_SESSION]
-    sessions.api.post_message = lambda ch, ts, text: posted.append(text)
+    sessions.api.post_message_checked = lambda ch, ts, text: posted.append(text) or "1.1"
     try:
         sessions._deliver_final_output(
             {"channel": "D1", "thread_ts": "1.0", "started_at": 0.0, "session_id": "x"},
             FINAL_OUTPUT)
     finally:
-        sessions._bot_posts_since, sessions.api.post_message = saved
+        sessions._bot_posts_since, sessions.api.post_message_checked = saved
     assert posted == [], posted
 
 
