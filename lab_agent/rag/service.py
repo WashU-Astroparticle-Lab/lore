@@ -31,12 +31,19 @@ def service_port() -> int:
 
 # ── client (used by query_kb) ─────────────────────────────────────────────────
 
+class ServiceError(RuntimeError):
+    """The service is up but could not answer (e.g. the Claude login expired)."""
+
+
 def query_via_service(question: str, mode: str = "hybrid", timeout: float = 600.0) -> str | None:
-    """Return the warm service's answer, or None if it's unreachable/erroring (caller falls back).
+    """Return the warm service's answer, or None if it isn't running (caller falls back).
 
     Connection-refused (service not started or still warming up) fails fast, so the fallback is
     quick; the long timeout only matters once connected, since the answer includes LLM synthesis.
+    An error *from* the service raises ServiceError: falling back then only re-ran the same
+    failing query cold, 30 s later, and crashed without the candidate pages.
     """
+    import urllib.error
     import urllib.request
 
     payload = json.dumps({"question": question, "mode": mode}).encode()
@@ -45,6 +52,14 @@ def query_via_service(question: str, mode: str = "hybrid", timeout: float = 600.
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read().decode("utf-8")).get("answer")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 503:
+            return None  # up but holding no graph (a reload failed): use the cold path
+        try:
+            detail = json.loads(exc.read().decode("utf-8")).get("error", "")
+        except Exception:  # noqa: BLE001
+            detail = ""
+        raise ServiceError(detail or f"HTTP {exc.code}") from exc
     except Exception:
         return None
 
@@ -119,6 +134,9 @@ def serve() -> None:
             if self.path != "/query":
                 self._send(404, {"error": "not found"})
                 return
+            if state["kg"] is None:
+                self._send(503, {"error": "no graph loaded"})
+                return
             try:
                 n = int(self.headers.get("Content-Length", 0))
                 req = json.loads(self.rfile.read(n).decode("utf-8"))
@@ -131,25 +149,68 @@ def serve() -> None:
             self._send(200 if self.path == "/health" else 404,
                        {"status": "ready"} if self.path == "/health" else {"error": "not found"})
 
-    server = HTTPServer(("127.0.0.1", service_port()), Handler)
+    try:
+        server = _ExclusiveHTTPServer(("127.0.0.1", service_port()), Handler)
+    except OSError as exc:
+        print(f"[kg-service] port {service_port()} is already in use ({exc}): another listener "
+              "is probably running. Not starting a second service.", flush=True)
+        return
     server.timeout = 1.0
     while not _stop.is_set():
         server.handle_request()           # one request, or return after 1s if idle
         if reload_flag.is_set():
             reload_flag.clear()
             print("[kg-service] reloading graph after refresh...", flush=True)
-            try:
-                old = state["kg"]
-                fresh = KnowledgeGraph(kbdir)
-                fresh._ensure_backend()
-                state["kg"] = fresh
-                try:
-                    old.close()
-                except Exception:
-                    pass
-                print("[kg-service] reload complete.", flush=True)
-            except Exception as exc:       # noqa: BLE001 — keep serving the old graph
-                print(f"[kg-service] reload failed (keeping current graph): {exc}", flush=True)
+            state["kg"] = _reload(state["kg"], kbdir)
+
+
+def _reload(old, kbdir):
+    """Close the loaded graph and load it again from disk; None if that fails.
+
+    Building a second LightRAG in the same process used to look like a reload, but LightRAG
+    reads its JSON stores (text chunks, docs, doc status, LLM cache) from disk once per
+    process ("No reload path"). After a refresh the service kept the old chunks, so new
+    pages' text was missing from answers, and its next save wrote the stale cache back over
+    the refresh's. Resetting LightRAG's shared data first makes the new instance read disk.
+    """
+    from . import KnowledgeGraph
+
+    try:
+        old.close()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from lightrag.kg.shared_storage import finalize_share_data
+        finalize_share_data()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[kg-service] could not reset LightRAG's shared data ({exc})", flush=True)
+    try:
+        fresh = KnowledgeGraph(kbdir)
+        fresh._ensure_backend()
+        print("[kg-service] reload complete.", flush=True)
+        return fresh
+    except Exception as exc:  # noqa: BLE001 — clients fall back to the cold path on 503
+        print(f"[kg-service] reload failed; queries use the cold path until restart: {exc}",
+              flush=True)
+        return None
+
+
+class _ExclusiveHTTPServer(HTTPServer):
+    """An HTTPServer that cannot share its port.
+
+    HTTPServer sets SO_REUSEADDR, and on Windows that lets a second process bind and listen
+    on a port already in use. Two listeners each ran a service on 8765 and requests went to
+    either, possibly the stale one.
+    """
+
+    allow_reuse_address = False
+
+    def server_bind(self):
+        import socket
+
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 def serve_in_background() -> threading.Thread:

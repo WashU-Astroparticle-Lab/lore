@@ -10,13 +10,29 @@ import tempfile
 from pathlib import Path
 
 from lab_agent.rag.incremental import (
-    normalized_hash, plan_refresh, load_manifest, save_manifest,
+    legacy_hash, normalized_hash, plan_refresh, load_manifest, save_manifest,
 )
 
 
 def test_normalized_hash_ignores_formatting_but_not_content():
-    assert normalized_hash("Hello,  World!") == normalized_hash("hello world")
+    assert normalized_hash("Hello,  World!") == normalized_hash("hello,\n world!")
     assert normalized_hash("f0 = 5 GHz") != normalized_hash("f0 = 6 GHz")   # real change
+
+
+def test_a_corrected_sign_or_unit_is_a_change():
+    # The old hash dropped every non-alphanumeric character, so these were "unchanged" and
+    # a correction to a page never reached the graph.
+    for before, after in (("shift = -2 MHz", "shift = +2 MHz"), ("Qi < 1e5", "Qi > 1e5"),
+                          ("bias 10 µA", "bias 10 A")):
+        assert normalized_hash(before) != normalized_hash(after), (before, after)
+        assert legacy_hash(before) == legacy_hash(after), "the bug this replaces"
+
+
+def test_a_legacy_manifest_is_upgraded_without_reindexing():
+    docs = {"a": "f0 = 5 GHz, Qi < 1e5"}
+    plan = plan_refresh(docs, {"a": legacy_hash(docs["a"])})
+    assert plan["unchanged"] == ["a"] and plan["changed"] == [] and plan["new"] == []
+    assert plan["next_manifest"]["a"] == normalized_hash(docs["a"])
 
 
 def test_plan_classifies_new_changed_unchanged_removed():

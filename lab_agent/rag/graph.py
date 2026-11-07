@@ -88,12 +88,14 @@ class KnowledgeGraph:
         """Insert/replace one doc under a stable id (so it can be updated/deleted)."""
         self._ensure_backend().insert(doc_id, _format_doc({"source": doc_id, "text": text}))
 
-    def delete(self, doc_id: str) -> None:
-        """Best-effort removal of a doc from the graph (older-version-tolerant)."""
+    def delete(self, doc_id: str) -> bool:
+        """Remove a doc from the graph. False (and a log line) if it could not be removed."""
         try:
             self._ensure_backend().delete(doc_id)
+            return True
         except Exception as exc:  # noqa: BLE001 — deletion support is version-dependent
-            print(f"[rag] delete({doc_id}) unsupported/failed: {exc}")
+            print(f"[rag] delete({doc_id}) failed: {exc}")
+            return False
 
     def build(self, docs: list[dict]) -> int:
         """Index a list of {id, text, source} docs. Returns the count inserted."""
@@ -298,25 +300,79 @@ class _LightRAGBackend:
         self._loop = (asyncio.ProactorEventLoop() if sys.platform == "win32"
                       else asyncio.new_event_loop())
         # Low concurrency: each LLM call spawns a `claude -p` process, so cap parallelism.
+        # enable_llm_cache=False: answers are not cached. The cache key is the question, not
+        # what the graph held, so a question asked again after a refresh got the old answer
+        # word for word, including one that was an agent's narration. Entity-extraction
+        # results stay cached (enable_llm_cache_for_entity_extract): deletes rebuild from them.
         self._rag = LightRAG(
             working_dir=str(working_dir),
             llm_model_func=_claude_code_llm_func,
             llm_model_max_async=int(os.environ.get("KB_LLM_CONCURRENCY", "2")),
             embedding_func=_local_embed_func(),
+            enable_llm_cache=False,
         )
         self._loop.run_until_complete(self._rag.initialize_storages())
         self._loop.run_until_complete(initialize_pipeline_status())
 
     def insert(self, doc_id: str, text: str) -> None:
+        """Index one doc; raises if LightRAG recorded it as failed.
+
+        ainsert does not raise when extraction fails: it marks the doc "failed" in its doc
+        status and returns. So a page whose extraction died when the Claude login expired
+        was counted as indexed and never retried (2026-10-22, 8 pages).
+        """
         # ids= pins a stable doc id so a changed doc replaces (not duplicates) the old one.
         self._loop.run_until_complete(self._rag.ainsert(text, ids=doc_id))
+        status = self._loop.run_until_complete(self._rag.doc_status.get_by_id(doc_id)) or {}
+        state = str(status.get("status", "")).lower()
+        if state.endswith("failed"):
+            raise RuntimeError(f"LightRAG marked it failed: {str(status.get('error_msg'))[:300]}")
 
     def delete(self, doc_id: str) -> None:
-        self._loop.run_until_complete(self._rag.adelete_by_doc_id(doc_id))
+        """Remove one doc; raises if LightRAG reports the delete failed (it returns, not raises)."""
+        result = self._loop.run_until_complete(self._rag.adelete_by_doc_id(doc_id))
+        state = getattr(result, "status", "success")
+        if state not in ("success", "not_found"):
+            raise RuntimeError(f"delete {state}: {getattr(result, 'message', '')[:300]}")
 
     def query(self, question: str, mode: str = "hybrid") -> str:
         return self._loop.run_until_complete(
             self._rag.aquery(question, param=self._QueryParam(mode=mode)))
+
+    def _shutdown_workers(self) -> None:
+        """Stop LightRAG's queue workers the way LightRAG does.
+
+        Cancelling them is not enough: a worker cancelled mid-task catches the cancellation
+        and keeps looping until its shutdown event is set, so close() waited on it forever.
+        On 2026-10-22 the nightly build sat there for six days and no refresh ran.
+        """
+        import asyncio
+
+        seen, funcs = set(), []
+
+        def visit(obj):
+            if obj is None or id(obj) in seen:
+                return
+            seen.add(id(obj))
+            if callable(obj) and callable(getattr(obj, "shutdown", None)):
+                funcs.append(obj.shutdown)
+            inner = getattr(obj, "func", None)
+            if inner is not None and inner is not obj:
+                visit(inner)
+
+        for value in list(vars(self._rag).values()):
+            visit(value)
+            if isinstance(value, dict):
+                for v in value.values():
+                    visit(v)
+                    for w in (vars(v).values() if hasattr(v, "__dict__") else ()):
+                        visit(w)
+        for shutdown in funcs:
+            try:
+                self._loop.run_until_complete(
+                    asyncio.wait_for(shutdown(graceful=False, timeout=5), timeout=10))
+            except Exception:  # noqa: BLE001 — best effort; the bounded wait below still ends
+                pass
 
     def close(self) -> None:
         import asyncio
@@ -325,12 +381,17 @@ class _LightRAGBackend:
             self._loop.run_until_complete(self._rag.finalize_storages())
         except Exception:
             pass
+        self._shutdown_workers()
         try:
             pending = asyncio.all_tasks(self._loop)
             for t in pending:
                 t.cancel()
             if pending:
-                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                # Bounded: a task that ignores cancellation must not hold the process forever.
+                self._loop.run_until_complete(asyncio.wait(pending, timeout=30))
         except Exception:
             pass
-        self._loop.close()
+        try:
+            self._loop.close()
+        except Exception:  # noqa: BLE001 — a task still pending after the bounded wait
+            pass

@@ -42,13 +42,15 @@ def _la_image_id(url: str) -> str:
 
 
 def _enumerate_pages(adapter, nbid: str, parent: str = "0", depth: int = 0,
-                     out: list | None = None, exclude: set[str] | None = None
-                     ) -> list[tuple[str, str]]:
+                     out: list | None = None, exclude: set[str] | None = None,
+                     failures: list | None = None) -> list[tuple[str, str]]:
     """Recursively collect (display_title, tree_id) for every page in a notebook.
 
     *exclude* is a set of lowercased folder display-texts to skip entirely (e.g. the
     "AI Agent" upload folder — we don't index LORE's own reports). One retry on a
-    transient tree-level failure so a hiccup doesn't silently drop a whole subtree.
+    transient tree-level failure so a hiccup doesn't silently drop a whole subtree; a
+    subtree that still fails is logged and recorded in *failures*, so the crawl is known
+    to be partial and nothing is pruned on its account.
     """
     if out is None:
         out = []
@@ -60,7 +62,10 @@ def _enumerate_pages(adapter, nbid: str, parent: str = "0", depth: int = 0,
     except Exception:
         try:
             nodes = adapter._get_tree_level(nbid, parent)   # one retry
-        except Exception:
+        except Exception as exc:
+            print(f"[la_crawl] could not list folder {parent!r} in notebook {nbid!r}: {exc}")
+            if failures is not None:
+                failures.append(parent)
             return out
     for node in nodes:
         b64 = node.findtext("tree-id") or ""
@@ -70,19 +75,20 @@ def _enumerate_pages(adapter, nbid: str, parent: str = "0", depth: int = 0,
             if display and b64:
                 out.append((display, b64))
         elif b64 and display.lower() not in exclude:   # don't descend into excluded folders
-            _enumerate_pages(adapter, nbid, b64, depth + 1, out, exclude)
+            _enumerate_pages(adapter, nbid, b64, depth + 1, out, exclude, failures)
     return out
 
 
 def crawl(adapter=None, notebooks: list[str] | None = None,
           max_pages: int | None = None, exclude_folders: set[str] | None = None,
-          images_out: dict | None = None) -> list[dict]:
+          images_out: dict | None = None, status_out: dict | None = None) -> list[dict]:
     """Return [{notebook, page, nbid, tree_id, text}, …] for LabArchives pages.
 
     *adapter* is injected for testing; in production a real LabArchivesAdapter is used
     only for its authenticated low-level methods. *notebooks* filters by name (the KG
     is scoped to the primary notebook); *exclude_folders* skips folders by display-text
-    (e.g. the AI Agent upload folder); *max_pages* caps pages fetched.
+    (e.g. the AI Agent upload folder); *max_pages* caps pages fetched. *status_out*, if
+    given, receives {"tree_failures": n, "fetch_failed": {safe names}, "truncated": bool}.
     """
     adapter = adapter or LabArchivesAdapter("__crawl__")
     exclude = {f.strip().lower() for f in (exclude_folders or set()) if f.strip()}
@@ -93,10 +99,15 @@ def crawl(adapter=None, notebooks: list[str] | None = None,
 
     corpus: list[dict] = []
     seen_pages: list[tuple[str, str, str]] = []  # (display, nbid, tree_id) for page_index
+    failures: list = []
+    fetch_failed: set[str] = set()
+    truncated = False
     for nb in nbs:
         nbid = nb["nbid"]
-        for display, tree_id in _enumerate_pages(adapter, nbid, exclude=exclude):
+        for display, tree_id in _enumerate_pages(adapter, nbid, exclude=exclude,
+                                                 failures=failures):
             if max_pages is not None and len(corpus) >= max_pages:
+                truncated = True
                 break
             seen_pages.append((display, nbid, tree_id))
             try:
@@ -104,6 +115,7 @@ def crawl(adapter=None, notebooks: list[str] | None = None,
                 entries = adapter._parse_entries_xml(xml)
             except Exception as exc:
                 print(f"[la_crawl] Skipping page {display!r}: {exc}")
+                fetch_failed.add(_safe(display))
                 continue
             # Tier 1: record this page's embedded images (URLs only — no fetch, no cookie),
             # keyed by the same safe-name as the la_page doc so Tier 2 can map KG hit -> figures.
@@ -132,6 +144,9 @@ def crawl(adapter=None, notebooks: list[str] | None = None,
         page_index.record_pages(seen_pages)
     except Exception:
         pass
+    if status_out is not None:
+        status_out.update(tree_failures=len(failures), fetch_failed=fetch_failed,
+                          truncated=truncated, notebooks=len(nbs))
     return corpus
 
 
@@ -155,30 +170,71 @@ def write_corpus(corpus: list[dict]) -> int:
 
 
 IMAGE_MANIFEST_PATH = KNOWLEDGE_ROOT / "labarchives_images.json"
+# The most stale pages one crawl may remove (or 10% of the corpus, if more).
+MAX_PRUNE = 5
 
 
-def write_image_manifest(images_by_page: dict) -> int:
+def prune_corpus(keep: set[str]) -> list[str]:
+    """Delete crawled page files not in *keep* (safe names); return the names removed.
+
+    Only called after a complete crawl. write_corpus never removed anything, so a renamed
+    page stayed in the corpus under its old name (20261014_Qubit.md beside its new
+    20261014_BE260213_2_D2.md, same tree_id), and a deleted or emptied page stayed in the
+    graph forever: the refresh's "removed" never fired.
+    """
+    la_dir = KNOWLEDGE_ROOT / "labarchives"
+    removed = []
+    for f in la_dir.glob("*.md"):
+        if f.stem not in keep:
+            try:
+                f.unlink()
+                removed.append(f.stem)
+            except OSError as exc:
+                print(f"[la_crawl] could not remove stale page {f.name}: {exc}")
+    return sorted(removed)
+
+
+def _load_image_manifest() -> dict:
+    try:
+        return json.loads(IMAGE_MANIFEST_PATH.read_text(encoding="utf-8")).get("pages", {})
+    except Exception:  # noqa: BLE001 — missing or unreadable: start over
+        return {}
+
+
+def write_image_manifest(images_by_page: dict, complete: bool = True,
+                         keep: set[str] | None = None) -> int:
     """Write the Tier-1 per-page image manifest; return total image count.
 
     Maps ``{safe_page_name: {page, nbid, tree_id, images:[urls]}}`` — the safe name
     matches the ``la_page:<name>`` KG doc, so once a query resolves to a page, Tier 2
     can look up its figures here and fetch them on demand (cookie-gated).
+
+    A partial crawl (``complete=False``) updates the pages it saw and keeps the rest. It
+    used to replace the file, so a 25-page smoke run left every other page with "No
+    figures found". *keep* names pages whose fetch failed: their old entries are kept.
     """
     IMAGE_MANIFEST_PATH.parent.mkdir(parents=True, exist_ok=True)
-    total = sum(len(v.get("images", [])) for v in images_by_page.values())
-    IMAGE_MANIFEST_PATH.write_text(
-        json.dumps({"pages": images_by_page}, indent=2), encoding="utf-8")
+    old = _load_image_manifest()
+    if complete:
+        pages = {k: v for k, v in old.items() if k in (keep or set())}
+        pages.update(images_by_page)
+    else:
+        pages = dict(old)
+        pages.update(images_by_page)
+    total = sum(len(v.get("images", [])) for v in pages.values())
+    IMAGE_MANIFEST_PATH.write_text(json.dumps({"pages": pages}, indent=2), encoding="utf-8")
     return total
 
 
 def crawl_to_bundle(notebooks: list[str] | None = None, max_pages: int | None = None,
-                    exclude_folders: set[str] | None = None) -> int:
+                    exclude_folders: set[str] | None = None, adapter=None) -> int:
     """Crawl LabArchives and write the corpus into knowledge/labarchives/. Returns count.
 
     Defaults: notebooks -> the lab_config "Primary notebook" (KG is scoped to it);
     exclude_folders -> the lab_config "Upload folder" (the AI Agent folder — LORE's own
     reports are kept out of the graph).
     """
+    default_scope = notebooks is None and exclude_folders is None
     if notebooks is None:
         primary = lab_config_value("Primary notebook").strip()
         notebooks = [primary] if primary else None
@@ -186,9 +242,33 @@ def crawl_to_bundle(notebooks: list[str] | None = None, max_pages: int | None = 
         upload = lab_config_value("Upload folder").strip()
         exclude_folders = {upload} if upload else set()
     images_out: dict = {}
-    corpus = crawl(notebooks=notebooks, max_pages=max_pages,
-                   exclude_folders=exclude_folders, images_out=images_out)
+    status: dict = {}
+    corpus = crawl(adapter=adapter, notebooks=notebooks, max_pages=max_pages,
+                   exclude_folders=exclude_folders, images_out=images_out, status_out=status)
     n = write_corpus(corpus)
-    n_imgs = write_image_manifest(images_out)
-    print(f"[la_crawl] image manifest: {len(images_out)} page(s) with {n_imgs} image(s)")
+    # Complete = the usual scope, uncapped, every folder listed. Only then is a page that
+    # was not seen known to be gone; a partial crawl prunes nothing.
+    complete = (default_scope and max_pages is None and not status.get("tree_failures")
+                and not status.get("truncated") and status.get("notebooks", 0) > 0
+                and len(corpus) > 0)
+    fetch_failed = status.get("fetch_failed", set())
+    if complete:
+        keep = {_safe(d["page"]) for d in corpus} | fetch_failed
+        existing = [f.stem for f in (KNOWLEDGE_ROOT / "labarchives").glob("*.md")]
+        stale = [s for s in existing if s not in keep]
+        # A safety valve: a crawl that suddenly sees far fewer pages is more likely broken
+        # (a permission change, a renamed notebook) than a lab that deleted its notebook.
+        if len(stale) > max(MAX_PRUNE, len(existing) // 10):
+            print(f"[la_crawl] NOT removing {len(stale)} of {len(existing)} pages: too many "
+                  "at once to trust. Check the crawl; remove them by hand if they are gone.")
+        else:
+            removed = prune_corpus(keep)
+            if removed:
+                print(f"[la_crawl] removed {len(removed)} page(s) no longer in LabArchives "
+                      f"(renamed, deleted or emptied): {', '.join(removed)}")
+    else:
+        print("[la_crawl] partial crawl: no stale pages removed, figure manifest merged")
+    n_imgs = write_image_manifest(images_out, complete=complete, keep=fetch_failed)
+    print(f"[la_crawl] image manifest: {len(images_out)} page(s) crawled, {n_imgs} image(s) "
+          "listed")
     return n

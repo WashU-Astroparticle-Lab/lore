@@ -127,8 +127,8 @@ def main() -> None:
           "to LabArchives every 30 s.", flush=True)
     refresh_hour = kg_refresh_hour()
     threading.Thread(target=kg_refresh_loop, args=(refresh_hour,), daemon=True).start()
-    print(f"[slack-listener] Nightly KG refresh scheduled for {refresh_hour:02d}:00 "
-          "(local); Task Scheduler job kept as fallback, build lock prevents overlap.", flush=True)
+    print(f"[slack-listener] Daily KG refresh scheduled for {refresh_hour:02d}:00 (local); "
+          "the build lock keeps it from overlapping any other build.", flush=True)
     # Host the warm knowledge-graph query service so Slack Q&A skips the ~25-40s cold start
     # per question. It loads the graph once in its own thread; query_kb falls back to a cold
     # load if it isn't up. No-op if the RAG deps / built graph are absent.

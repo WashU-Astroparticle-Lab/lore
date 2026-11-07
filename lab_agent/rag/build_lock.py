@@ -37,6 +37,43 @@ def _lock_path() -> Path:
     return kb_dir() / "kb_build.lock"
 
 
+def _pid_in(text: str) -> int | None:
+    for part in text.split():
+        if part.startswith("pid="):
+            try:
+                return int(part[4:])
+            except ValueError:
+                return None
+    return None
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether process ``pid`` is running. Errs towards True when it cannot tell."""
+    if pid == os.getpid():
+        return True
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.get_last_error() == 5  # access denied: it exists
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 @contextmanager
 def build_lock():
     """Hold the exclusive KG-build lock for the duration of the ``with`` block.
@@ -46,10 +83,17 @@ def build_lock():
     path = _lock_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Reclaim a stale lock left behind by a crashed/killed builder.
+    # Reclaim a lock left behind by a crashed/killed builder: one whose process is gone, or
+    # one older than STALE_SECONDS. Age alone meant a hard-killed build blocked every run
+    # for six hours, each skip looking like success.
     try:
-        if time.time() - path.stat().st_mtime > STALE_SECONDS:
-            path.unlink(missing_ok=True)
+        held = path.read_text(encoding="utf-8", errors="replace")
+        pid = _pid_in(held)
+        if (pid is not None and not _pid_alive(pid)) or \
+                time.time() - path.stat().st_mtime > STALE_SECONDS:
+            # Only remove the lock we judged stale, not one another builder just took.
+            if path.read_text(encoding="utf-8", errors="replace") == held:
+                path.unlink(missing_ok=True)
     except FileNotFoundError:
         pass
 

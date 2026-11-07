@@ -501,9 +501,9 @@ def reaper_loop() -> None:
 # The KG must be re-indexed as pages change, but a full rebuild is expensive, so
 # `build_kb --index` re-indexes only new/changed pages (manifest-driven; unchanged
 # pages cost no LLM tokens). We run that refresh from inside the always-on listener
-# so there is one long-lived process to keep alive. The standalone Task Scheduler
-# job (LORE-KG-nightly) is kept as a fallback; the cross-process build lock in
-# lab_agent.rag.build_lock ensures the two never build at the same time.
+# so there is one long-lived process to keep alive. A Task Scheduler job (LORE-KG-nightly)
+# can run the same build as a fallback, though the lab PC has none; the cross-process build
+# lock in lab_agent.rag.build_lock ensures two builders never run at the same time.
 
 DEFAULT_KG_REFRESH_HOUR = 2
 
@@ -532,6 +532,12 @@ def kg_refresh_hour() -> int:
     return hour
 
 
+KG_REFRESH_TIMEOUT_S = int(os.environ.get("KB_REFRESH_TIMEOUT_H", "4")) * 3600
+_KG_EXIT_MEANING = {0: "ok", 3: "SKIPPED, RAG packages missing (wrong Python?)",
+                    4: "skipped, another build holds the lock",
+                    5: "partial, some pages not indexed (see the log)"}
+
+
 def _run_kg_refresh() -> None:
     """Run one incremental KG refresh as a subprocess (plan auth, not API)."""
     # Same env scrub as session spawns: the build LLM (`claude -p`) must use the
@@ -554,17 +560,18 @@ def _run_kg_refresh() -> None:
             stderr=log,
             env=child_env,
         )
-        proc.wait()
-    print(f"[kg-refresh] finished (exit {proc.returncode}); log: {log_path.name}", flush=True)
-    # Tell the warm KG service to reload the freshly-rebuilt graph (best-effort; no-op if the
-    # service isn't running). Otherwise it would keep serving the pre-refresh graph until restart.
-    if proc.returncode == 0:
         try:
-            from ..rag.service import trigger_reload
-            if trigger_reload():
-                print("[kg-refresh] signaled warm KG service to reload.", flush=True)
-        except Exception as exc:  # noqa: BLE001
-            print(f"[kg-refresh] reload signal failed: {exc}", flush=True)
+            # Bounded: a build that hung on 2026-10-22 held this thread for six days, and no
+            # refresh ran until the listener was stopped.
+            proc.wait(timeout=KG_REFRESH_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            proc.wait(timeout=60)
+            log.write(f"\n=== KG refresh killed after {KG_REFRESH_TIMEOUT_S // 3600} h ===\n")
+    outcome = _KG_EXIT_MEANING.get(proc.returncode, "failed")
+    print(f"[kg-refresh] finished: {outcome} (exit {proc.returncode}); log: {log_path.name}",
+          flush=True)
+    # build_kb tells the warm service to reload when it changed the graph.
 
 
 def kg_refresh_loop(hour: int | None = None) -> None:

@@ -42,12 +42,16 @@ def main() -> None:
         # loading the graph in-process, exactly as before.
         from ..rag import service as kg_service
 
-        answer = kg_service.query_via_service(question, mode)
-        if answer is None:
-            try:
-                answer = kg.query(question, mode=mode)
-            finally:
-                kg.close()
+        try:
+            answer = kg_service.query_via_service(question, mode)
+            if answer is None:
+                try:
+                    answer = kg.query(question, mode=mode)
+                finally:
+                    kg.close()
+        except Exception as exc:  # noqa: BLE001 — still give the free candidate pages below
+            answer = (f"(The knowledge graph could not answer: {exc}. Use the candidate pages "
+                      "below, and say that the graph was unavailable.)")
         print(answer)
 
     # Hybrid resolution. The graph is strong on concepts but weak on raw identifiers:

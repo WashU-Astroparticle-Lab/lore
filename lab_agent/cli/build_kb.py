@@ -38,16 +38,20 @@ def main() -> None:
     # that finds the lock held skips this run rather than racing.
     from ..rag.build_lock import BuildLockHeld, build_lock
 
+    code = 0
     try:
         with build_lock():
             n = la_crawl.crawl_to_bundle(notebooks=notebooks, max_pages=max_pages)
             print(f"[build_kb] wrote {n} LabArchives page(s) to knowledge/labarchives/")
 
             if "--index" in args:
-                _build_index(full="--full" in args)
+                code = _build_index(full="--full" in args)
     except BuildLockHeld as exc:
+        # Not a success: the listener used to log "finished (exit 0)" and reload a graph
+        # another builder was still writing.
         print(f"[build_kb] another build is already in progress — skipping this run ({exc}).")
-        sys.exit(0)
+        sys.exit(EXIT_LOCK_HELD)
+    sys.exit(code)
 
 
 def _gather_corpus() -> dict[str, str]:
@@ -66,7 +70,17 @@ def _gather_corpus() -> dict[str, str]:
     return docs
 
 
-def _build_index(full: bool = False) -> None:
+# Exit codes the listener's refresh can tell apart from a real success.
+EXIT_DEPS_MISSING = 3   # --index on an interpreter without the RAG packages
+EXIT_LOCK_HELD = 4      # another build holds the lock
+EXIT_PARTIAL = 5        # some pages failed, or the run stopped early
+
+# An extraction error that means every later page would fail the same way.
+_STOP_ALL = ("failed to authenticate", "oauth", "re-authenticate", "usage limit",
+             "credit balance", "invalid api key", "not on path")
+
+
+def _build_index(full: bool = False) -> int:
     """Incrementally refresh the LightRAG KG — only new/changed docs are (re-)indexed.
 
     The manifest fingerprints each indexed doc so unchanged pages cost no LLM tokens.
@@ -86,7 +100,7 @@ def _build_index(full: bool = False) -> None:
     if not backend_available():
         print("[build_kb] RAG deps not installed — skipping index. "
               "Enable with:  pip install -e '.[rag]'")
-        return
+        return EXIT_DEPS_MISSING
 
     docs = _gather_corpus()
     manifest = {} if full else load_manifest()
@@ -94,19 +108,33 @@ def _build_index(full: bool = False) -> None:
 
     kg = KnowledgeGraph(kb_dir())
     cur = dict(manifest)                         # running manifest, checkpointed per doc
-    to_index = plan["new"] + plan["changed"]
+    for doc_id in plan["unchanged"]:             # upgrades legacy hashes; no LLM cost
+        cur[doc_id] = plan["next_manifest"][doc_id]
+    to_index = list(plan["new"])
+    failed: list[str] = []
+    stopped = None
     try:
         for doc_id in plan["changed"] + plan["removed"]:
-            kg.delete(doc_id)                    # drop the old version first
-        for doc_id in plan["removed"]:
-            cur.pop(doc_id, None)
+            # Drop the old version first. If that fails, keep the doc's manifest entry so it
+            # is tried again: re-inserting an id LightRAG still holds is silently dropped.
+            if not kg.delete(doc_id):
+                failed.append(doc_id)
+                continue
+            if doc_id in plan["removed"]:
+                cur.pop(doc_id, None)
+            else:
+                to_index.append(doc_id)
         save_manifest(cur)
         for i, doc_id in enumerate(to_index, 1):
             try:
                 kg.insert(doc_id, docs[doc_id])  # (re-)index — the only token-costing step
             except Exception as exc:             # noqa: BLE001 — one bad page shouldn't stop the build
                 print(f"[build_kb]   FAILED {i}/{len(to_index)} {doc_id}: {exc}", flush=True)
-                continue                         # not marked done → retried on the next run
+                failed.append(doc_id)            # not marked done → retried on the next run
+                if any(k in str(exc).lower() for k in _STOP_ALL):
+                    stopped = str(exc)[:200]
+                    break
+                continue
             cur[doc_id] = plan["next_manifest"][doc_id]
             save_manifest(cur)                   # checkpoint → interrupted builds resume here
             print(f"[build_kb]   indexed {i}/{len(to_index)}: {doc_id}", flush=True)
@@ -118,6 +146,22 @@ def _build_index(full: bool = False) -> None:
           f"{len(plan['unchanged'])} unchanged (skipped), {len(plan['removed'])} removed. "
           f"Re-indexed {reindexed}/{len(docs)} docs — no LLM cost on the "
           f"{len(plan['unchanged'])} unchanged.")
+    if stopped:
+        # Each later page would fail the same way, and while it failed LightRAG re-tried
+        # every earlier failure on every insert: 36 failed extractions on 2026-10-22.
+        print(f"[build_kb] STOPPED early: {stopped}. The Claude Code login used for the "
+              "graph needs attention (`claude` in a terminal on this machine).")
+    if failed:
+        print(f"[build_kb] {len(failed)} page(s) not indexed, retried next run: "
+              f"{', '.join(failed[:10])}{' …' if len(failed) > 10 else ''}")
+    if reindexed or plan["removed"]:
+        try:
+            from ..rag.service import trigger_reload
+            if trigger_reload():
+                print("[build_kb] told the warm KG service to reload.", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[build_kb] reload signal failed: {exc}", flush=True)
+    return EXIT_PARTIAL if failed or stopped else 0
 
 
 if __name__ == "__main__":

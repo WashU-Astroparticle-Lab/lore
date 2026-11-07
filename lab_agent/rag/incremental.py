@@ -19,6 +19,7 @@ from pathlib import Path
 from ..config import kb_dir
 
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
+_SPACE = re.compile(r"\s+")
 
 
 def _manifest_path() -> Path:
@@ -27,7 +28,17 @@ def _manifest_path() -> Path:
 
 
 def normalized_hash(text: str) -> str:
-    """Hash of content normalized to ignore case/whitespace/punctuation-only edits."""
+    """Hash of content normalized to ignore case and whitespace-only edits.
+
+    Punctuation counts. It used to be dropped too, so "-2 MHz" and "+2 MHz", "<" and ">",
+    "10 µA" and "10 A" hashed the same: a corrected sign or unit was never re-indexed.
+    """
+    norm = _SPACE.sub(" ", text.lower()).strip()
+    return "v2:" + hashlib.sha256(norm.encode("utf-8")).hexdigest()
+
+
+def legacy_hash(text: str) -> str:
+    """The pre-v2 hash, so existing manifests do not trigger a full re-index."""
     norm = _NON_ALNUM.sub(" ", text.lower()).strip()
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()
 
@@ -62,10 +73,11 @@ def plan_refresh(docs: dict[str, str], manifest: dict[str, str]) -> dict:
         next_manifest[doc_id] = h
         if doc_id not in manifest:
             new.append(doc_id)
-        elif manifest[doc_id] != h:
-            changed.append(doc_id)
-        else:
+        elif manifest[doc_id] == h or manifest[doc_id] == legacy_hash(text):
+            # A legacy entry for unchanged text is upgraded in place, at no LLM cost.
             unchanged.append(doc_id)
+        else:
+            changed.append(doc_id)
     removed = [doc_id for doc_id in manifest if doc_id not in docs]
     return {
         "new": new, "changed": changed, "unchanged": unchanged,
