@@ -30,8 +30,12 @@ _STOP = {
 }
 
 # High-signal, normalized artifacts only (skip raw notebooks/CSV dumps).
+# Not dr_conditions.md: each is a snapshot from the parser of its day, and the older ones
+# are wrong (an MC thermometer filed as "4K (TT-2450) 27.2 K", every reading counted 3-4
+# times). The DAQ agent got them from search() labelled "parsed data". DR numbers come from
+# run_dr.py or dr_status, fresh; a run's interpretation is still in extracted_dr.md.
 _CORPUS_GLOBS = [
-    "extracted_*.md", "connections.md", "dr_conditions.md",
+    "extracted_*.md", "connections.md",
     "[[]UNSIGNED[]] *.md", "labarchives.md",
 ]
 

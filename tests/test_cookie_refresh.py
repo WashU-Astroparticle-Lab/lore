@@ -60,6 +60,28 @@ def test_no_terminal_never_waits_for_enter():
     assert out.getvalue().strip() == "COOKIE_REFRESH_FAILED: the form never appeared.", out.getvalue()
 
 
+def test_the_cookie_is_written_without_disturbing_the_rest_of_env():
+    import tempfile
+    from pathlib import Path
+
+    crlf = "A=1\r\nLA_SESSION_COOKIE=old\r\n# LA_SESSION_COOKIE=commented\r\nB=2\r\n"
+    out = cookies.with_env_value(crlf, "LA_SESSION_COOKIE", "new")
+    assert out == "A=1\r\nLA_SESSION_COOKIE=new\r\n# LA_SESSION_COOKIE=commented\r\nB=2\r\n", out
+    # Forms the old rewrite matched by substring but never replaced, printing "updated".
+    for form in ("export LA_SESSION_COOKIE=old", "  LA_SESSION_COOKIE = old"):
+        out = cookies.with_env_value(f"A=1\n{form}\n", "LA_SESSION_COOKIE", "new")
+        assert out == "A=1\nLA_SESSION_COOKIE=new\n", (form, out)
+    dup = cookies.with_env_value("LA_SESSION_COOKIE=a\nLA_SESSION_COOKIE=b\n", "LA_SESSION_COOKIE", "c")
+    assert dup == "LA_SESSION_COOKIE=c\nLA_SESSION_COOKIE=c\n", "dotenv reads the last one"
+    assert cookies.with_env_value("A=1\n", "LA_SESSION_COOKIE", "x") == "A=1\nLA_SESSION_COOKIE=x\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        env = Path(tmp) / ".env"
+        env.write_bytes(crlf.encode("utf-8"))
+        cookies.write_env_value(env, "LA_SESSION_COOKIE", "fresh")
+        assert env.read_bytes() == crlf.replace("=old", "=fresh").encode("utf-8"), env.read_bytes()
+        assert [p.name for p in Path(tmp).iterdir()] == [".env"], "a temp file was left behind"
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in sorted(globals().items()):

@@ -17,7 +17,10 @@ so the session can tell the user why.
 """
 from __future__ import annotations
 
+import os
+import re
 import sys
+from pathlib import Path
 
 from dotenv import dotenv_values
 
@@ -43,6 +46,42 @@ def sso_settings_problem(settings: dict[str, str], interactive: bool) -> str | N
     return (f"lab_config.md has no {rows} row, so the login cannot be automated. Add it "
             "(see lab_config.template.md), or run get_la_cookies.py in a terminal on this "
             "machine and log in by hand.")
+
+
+def with_env_value(text: str, key: str, value: str) -> str:
+    """``text`` (a .env file) with ``key`` set to ``value``, everything else untouched.
+
+    Every active ``key=`` line is replaced, including ``export key=`` and indented ones;
+    python-dotenv reads the last of several. The old rewrite replaced only a line starting
+    exactly with ``key=``, while its substring check still printed "updated" when none did.
+    Line endings are kept.
+    """
+    newline = "\r\n" if "\r\n" in text else "\n"
+    pattern = re.compile(rf"^\s*(?:export\s+)?{re.escape(key)}\s*=")
+    lines = text.splitlines()
+    hit = False
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            lines[i] = f"{key}={value}"
+            hit = True
+    if not hit:
+        lines.append(f"{key}={value}")
+    return newline.join(lines) + newline
+
+
+def write_env_value(path, key: str, value: str) -> None:
+    """Set one .env value, writing a temporary file and swapping it in.
+
+    The file holds every credential, and the old code truncated it before rewriting: a
+    crash or a full disk in between would have emptied it.
+    """
+    path = Path(path)
+    # Bytes, not read_text: text mode turns CRLF into LF, and the endings must survive.
+    text = path.read_bytes().decode("utf-8") if path.exists() else ""
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as fh:
+        fh.write(with_env_value(text, key, value))
+    os.replace(tmp, path)
 
 
 def _fail(reason: str) -> None:
@@ -149,22 +188,7 @@ def main() -> None:
         cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in la_cookies)
 
         # Step 6: auto-update .env
-        with open(ENV_PATH, "r", encoding="utf-8") as f:
-            env_text = f.read()
-
-        new_line = f"LA_SESSION_COOKIE={cookie_str}"
-        if "LA_SESSION_COOKIE=" in env_text:
-            lines = env_text.splitlines()
-            for j, line in enumerate(lines):
-                if line.startswith("LA_SESSION_COOKIE="):
-                    lines[j] = new_line
-                    break
-            env_text = "\n".join(lines) + "\n"
-        else:
-            env_text += f"\n{new_line}\n"
-
-        with open(ENV_PATH, "w", encoding="utf-8") as f:
-            f.write(env_text)
+        write_env_value(ENV_PATH, "LA_SESSION_COOKIE", cookie_str)
 
         print()
         print("LA_SESSION_COOKIE updated in .env automatically.")
