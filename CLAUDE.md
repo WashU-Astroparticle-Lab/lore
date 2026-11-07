@@ -171,8 +171,24 @@ All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from 
 | Check a draft's numbers against a report | `python -m lab_agent.cli.verify_claims --draft <file> --source outputs/<id>` — presence only; wrong-label pairing still needs reading |
 | Refresh LabArchives cookies | `python get_la_cookies.py` — run it yourself, never ask the user to; it logs in with no one's help. On failure it prints `COOKIE_REFRESH_FAILED: <reason>` |
 | Slack (post/post-summary/upload/read-thread/channels/search/fetch-files) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above. **A report's summary goes out via `post-summary --run outputs/<id>`, never `post`** — it reads the gated `slack_summary.md` and takes no message text |
-| DR conditions | `python run_dr.py "YYYY-MM-DD" [--hours N]` |
+| DR conditions | `python run_dr.py "YYYY-MM-DD" [--hours N]`, or `"<start>" "<end>"`; the current state: `python run_dr.py --last 2` (prints, saves nothing) |
+| **One thermometer's readings as a file** | `python run_dr.py "<start>" "<end>" --csv "<label or channel>"` — e.g. `--csv RuOx12980` or `--csv 5`. One row per real measurement. **Never parse LogLCR files yourself** (see below) |
 | Disk footprint / retention | `python -m lab_agent.cli.cleanup` (dry run) then `--caches` / `--images` / `--logs` / `--all`. Policy in `lab_agent/retention.py`: the record (reports, extractions, critiques, provenance, metadata, corpus) is never auto-deleted; figures are reclaimed only once the report is uploaded AND the run has been idle for a week. Reading a figure marks it in use, so anything under discussion stays on disk |
+
+## Fridge logs: use run_dr.py, never your own parser
+
+`C:/LC Data/Data/LogLCR___<session>_N.dat` is **one file per bridge channel**, not time
+segments. Each row of `_5.dat` is a measurement of channel 5, and every other T column in that
+row is a stale copy of that channel's last reading. Merging the files counts every
+measurement 3–4 times with shifted times. Labels move between channels across sessions (`T5`
+was a CMN in early 2025, JH_RuOx late 2025, RuOx12980 since Feb 2026). An uncalibrated channel
+logs its resistance in the T column, and a CMN reads about 10 mK when the fridge is warm.
+`run_dr.py` handles all of that. Two hand-written extractions sent lab members CSVs with 3–4×
+too many rows, one with an "in calibration" range nobody had measured.
+
+When you give fridge data to someone, say where it came from, as `run_dr.py --csv` prints it:
+the thermometer label and channel, the window, how many readings, and what was left out. Never
+add a validity range or flag of your own.
 
 ## Known limitation
 Web app page IDs (e.g. `11400322`) do **not** map to API tree_ids. Pass page titles or base64 tree_ids instead. There is therefore **no per-page deep link** — when telling someone where a report is, give the notebook URL printed by the upload command plus "$UPLOAD_FOLDER / \<page title\>". Never invent, shorten, or elide a URL: a fabricated GitHub link in a draft channel message 404'd for the whole lab.

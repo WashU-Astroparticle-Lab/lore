@@ -28,9 +28,10 @@ here writes a file.
 """
 from __future__ import annotations
 
+import bisect
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 LCR_GLOB = "LogLCR___*.dat"
@@ -41,6 +42,7 @@ OTHER_LOG_GLOBS = ("logFP___*.dat", "logPT___*.dat", "LogLCR2___*.dat")
 _SESSION_TS = re.compile(r"(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})")
 _FILE_CHANNEL = re.compile(r"_(\d)\.dat$", re.IGNORECASE)
 _ROW_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
+_ROW_TS = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\t")
 
 
 def file_channel(name: str) -> int | None:
@@ -83,8 +85,29 @@ def _value(text: str) -> float | None:
     return v if math.isfinite(v) and v > 0 else None
 
 
+# Platinum sensors (PT100/PT1000) are calibrated down to tens of kelvin. Below that their
+# resistance barely changes and the calibration extrapolates to nonsense: the "MC Plate"
+# PT1000 logged 60-574 mK while the mixing chamber's own thermometer read 7-15 K.
+PLATINUM_MIN_MK = 20_000.0
+
+
+def _uncalibrated(t_text: str, r_text: str) -> bool:
+    """Whether a T cell just repeats the R cell: the channel had no calibration.
+
+    The software then copies the resistance into the temperature column, so 2.2 kOhm was
+    read as 2.2 K. It is checked per row, not from the header, because a calibration can be
+    switched on mid-file: on 2026-07-27 the header said "No Calibration" and from 15:13 the
+    column held real temperatures (12,895 Ohm next to 76 mK).
+    """
+    try:
+        t, r = float(t_text), float(r_text)
+    except ValueError:
+        return False
+    return math.isfinite(r) and abs(t - r) <= 1e-4 * max(abs(r), 1.0)
+
+
 def read_lcr_file(path: Path, start: datetime, end: datetime, channel: int | None = None,
-                  ) -> dict[str, list[tuple[datetime, float]]] | None:
+                  dropped: dict | None = None) -> dict[str, list[tuple[datetime, float]]] | None:
     """Readings per labelled thermometer in one LogLCR file, for rows in [start, end].
 
     With ``channel`` (the file's ``_N``), only column T<channel> is read: the other T
@@ -92,24 +115,42 @@ def read_lcr_file(path: Path, start: datetime, end: datetime, channel: int | Non
     key, with an empty list, so a caller can tell "not measured here" from "not wired".
     Without it, every column is read.
 
+    A reading is left out when it is not finite and positive, when the T column only
+    repeats the resistance (no calibration), or when a platinum sensor reads below its
+    range. ``dropped``, if given, counts what was left out: {label: {reason: n}}.
+
     Returns None when the file has no header row to take labels from.
     """
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         lines = fh.readlines()
     if len(lines) < 4:
         return None
-    names = lines[2].rstrip("\r\n").split("\t")
+    names = [n.strip() for n in lines[2].rstrip("\r\n").split("\t")]
     labels = lines[3].rstrip("\r\n").split("\t")
     if not labels or labels[0].strip() != "Date(String)":
         return None
+    # The row after the labels names each column's calibration ("RuOx12980", "PT1000",
+    # "No Calibration"), when the file has one.
+    calibrations = []
+    if len(lines) > 4 and not _ROW_TS.match(lines[4]):
+        calibrations = lines[4].rstrip("\r\n").split("\t")
 
     # T0..T9 are temperatures; the R columns before them are resistances.
-    channels = [(i, labels[i].strip()) for i, n in enumerate(names)
-                if re.fullmatch(r"T\d", n.strip()) and i < len(labels)
-                and _is_thermometer(labels[i])]
-    readings: dict[str, list[tuple[datetime, float]]] = {label: [] for _, label in channels}
+    channels = []
+    for i, n in enumerate(names):
+        if re.fullmatch(r"T\d", n) and i < len(labels) and _is_thermometer(labels[i]):
+            r = names.index(f"R{n[1:]}") if f"R{n[1:]}" in names else None
+            cal = calibrations[i].strip() if i < len(calibrations) else ""
+            channels.append((i, labels[i].strip(), r, "PT10" in cal.upper()))
+    readings: dict[str, list[tuple[datetime, float]]] = {c[1]: [] for c in channels}
     if channel is not None:
-        channels = [(i, label) for i, label in channels if names[i].strip() == f"T{channel}"]
+        channels = [c for c in channels if names[c[0]] == f"T{channel}"]
+
+    def drop(label: str, reason: str) -> None:
+        if dropped is not None:
+            counts = dropped.setdefault(label, {})
+            counts[reason] = counts.get(reason, 0) + 1
+
     for line in lines[4:]:
         parts = line.rstrip("\r\n").split("\t")
         try:
@@ -118,11 +159,18 @@ def read_lcr_file(path: Path, start: datetime, end: datetime, channel: int | Non
             continue  # calibration-name row, or a partial line being written
         if ts < start or ts > end:
             continue
-        for i, label in channels:
-            if i < len(parts):
-                v = _value(parts[i])
-                if v is not None:
-                    readings[label].append((ts, v))
+        for i, label, r, platinum in channels:
+            if i >= len(parts):
+                continue
+            v = _value(parts[i])
+            if v is None:
+                drop(label, "invalid")
+            elif r is not None and r < len(parts) and _uncalibrated(parts[i], parts[r]):
+                drop(label, "uncalibrated")
+            elif platinum and v < PLATINUM_MIN_MK:
+                drop(label, "below the sensor's range")
+            else:
+                readings[label].append((ts, v))
     return readings
 
 
@@ -142,24 +190,33 @@ def median(values: list[float]) -> float:
     return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2
 
 
-def collect_readings(root: Path, start: datetime, end: datetime, pattern: str = LCR_GLOB,
-                     ) -> tuple[dict[str, list[tuple[datetime, float]]], list[str], list[str]]:
-    """Every labelled thermometer's (time, mK) readings in [start, end], time-sorted.
-
-    Opens only files that can hold rows in the window, takes each channel's readings from
-    its own ``_N`` file only, and skips header-less stubs. A thermometer the bridge did not
-    scan in the window is present with an empty list. Returns (readings, files read, stubs
-    skipped).
-    """
-    merged: dict[str, list[tuple[datetime, float]]] = {}
-    files_read, stubs_skipped = [], []
+def _window_files(root: Path, start: datetime, end: datetime, pattern: str) -> list[Path]:
+    """The log files that can hold rows in [start, end]."""
+    out = []
     for f in sorted(root.glob(pattern)):
         began = _session_start(f.name)
         if began and began > end:
             continue
         if _mtime(f) < start:
             continue  # append-only: nothing written after the window began
-        chunk = read_lcr_file(f, start, end, file_channel(f.name))
+        out.append(f)
+    return out
+
+
+def collect_readings(root: Path, start: datetime, end: datetime, pattern: str = LCR_GLOB,
+                     dropped: dict | None = None,
+                     ) -> tuple[dict[str, list[tuple[datetime, float]]], list[str], list[str]]:
+    """Every labelled thermometer's (time, mK) readings in [start, end], time-sorted.
+
+    Opens only files that can hold rows in the window, takes each channel's readings from
+    its own ``_N`` file only, and skips header-less stubs. A thermometer the bridge did not
+    scan in the window is present with an empty list. Returns (readings, files read, stubs
+    skipped); ``dropped`` collects what read_lcr_file left out.
+    """
+    merged: dict[str, list[tuple[datetime, float]]] = {}
+    files_read, stubs_skipped = [], []
+    for f in _window_files(root, start, end, pattern):
+        chunk = read_lcr_file(f, start, end, file_channel(f.name), dropped)
         if chunk is None:
             stubs_skipped.append(f.name)
             continue
@@ -169,6 +226,101 @@ def collect_readings(root: Path, start: datetime, end: datetime, pattern: str = 
     for pts in merged.values():
         pts.sort()
     return merged, files_read, stubs_skipped
+
+
+# Below this, a mixing-chamber reading means the fridge is at base.
+BASE_MK = 300.0
+_BACKUP_WINDOW = timedelta(minutes=10)
+
+
+def is_cmn(label: str) -> bool:
+    """A CMN (paramagnetic salt) thermometer, by its label."""
+    return "CMN" in label.upper()
+
+
+def backed_cmn_base(readings: dict[str, list[tuple[datetime, float]]], label: str,
+                    ) -> tuple[list[tuple[datetime, float]], int]:
+    """A CMN channel's sub-base readings that another thermometer agrees with, and how many
+    it does not.
+
+    A CMN salt is only meaningful when cold. Warm, it still reads about 10 mK, and on
+    2026-07-27 a report printed "MXC base temperature, CMN223: min 9.4 mK" while the RuOx
+    read 0.4-3.3 K. So a CMN reading counts as base only if some resistive thermometer also
+    read below BASE_MK within ten minutes of it.
+    """
+    refs = [[(t, v) for t, v in pts] for name, pts in readings.items()
+            if pts and not is_cmn(name)]
+    times = [[t for t, _ in pts] for pts in refs]
+    backed, unbacked = [], 0
+    for ts, v in readings.get(label, []):
+        if v >= BASE_MK:
+            continue
+        ok = False
+        for pts, tl in zip(refs, times):
+            i = bisect.bisect_left(tl, ts - _BACKUP_WINDOW)
+            while i < len(tl) and tl[i] <= ts + _BACKUP_WINDOW:
+                if pts[i][1] < BASE_MK:
+                    ok = True
+                    break
+                i += 1
+            if ok:
+                break
+        if ok:
+            backed.append((ts, v))
+        else:
+            unbacked += 1
+    return backed, unbacked
+
+
+def _matches(label: str, wanted: str) -> bool:
+    return label.strip().lower() == wanted.strip().lower()
+
+
+def channel_series(root: Path, start: datetime, end: datetime, wanted: str) -> dict:
+    """One thermometer's readings for a CSV, from its own log file only.
+
+    ``wanted`` is a label ("RuOx12980") or a channel ("5", "T5"). Labels move between
+    channels from one session to the next, so a label is matched in each file's header.
+    Agents used to write their own extraction instead, and each one merged every channel
+    file: a channel-4 CSV sent to a lab member had 3,747 rows for about 1,250 measurements.
+
+    Returns {"readings": [(ts, mK)], "labels": {...}, "channels": {...}, "files": [...],
+    "dropped": {reason: n}, "pattern": glob}.
+    """
+    number = re.fullmatch(r"[Tt]?(\d)", wanted.strip())
+    for pattern in (LCR_GLOB, "LogLCR2___*.dat"):
+        out = {"readings": [], "labels": set(), "channels": set(), "files": [],
+               "dropped": {}, "pattern": pattern}
+        for f in _window_files(root, start, end, pattern):
+            n = file_channel(f.name)
+            if n is None:
+                continue
+            with f.open("r", encoding="utf-8", errors="replace") as fh:
+                head = [fh.readline() for _ in range(4)]
+            names = [x.strip() for x in head[2].rstrip("\r\n").split("\t")]
+            labels = head[3].rstrip("\r\n").split("\t")
+            col = names.index(f"T{n}") if f"T{n}" in names else None
+            if col is None or col >= len(labels):
+                continue
+            label = labels[col].strip()
+            hit = int(number.group(1)) == n if number else _matches(label, wanted)
+            if not hit:
+                continue
+            dropped: dict = {}
+            chunk = read_lcr_file(f, start, end, n, dropped)
+            if chunk is None:
+                continue
+            out["readings"] += chunk.get(label, [])
+            out["labels"].add(label)
+            out["channels"].add(n)
+            out["files"].append(f.name)
+            for reason, k in dropped.get(label, {}).items():
+                out["dropped"][reason] = out["dropped"].get(reason, 0) + k
+        if out["files"]:
+            out["readings"].sort()
+            return out
+    return {"readings": [], "labels": set(), "channels": set(), "files": [], "dropped": {},
+            "pattern": LCR_GLOB}
 
 
 def recent_thermometry(data_path: str | Path, start: datetime, end: datetime) -> dict:
@@ -204,6 +356,12 @@ def recent_thermometry(data_path: str | Path, start: datetime, end: datetime) ->
         if is_frozen(vals):
             channels[label]["frozen"] = ("the same value in every row: most likely not being "
                                          "scanned, so this is a held value, not a measurement")
+        if is_cmn(label) and last_v < BASE_MK:
+            backed, _ = backed_cmn_base(merged, label)
+            if not backed or backed[-1][0] < last_ts - _BACKUP_WINDOW:
+                channels[label]["doubtful"] = (
+                    "reads below 300 mK but no other thermometer does: a CMN salt reads "
+                    "about 10 mK when warm, so this does not show the fridge is at base")
 
     newest = max((datetime.fromisoformat(c["latest_at"]) for c in channels.values()),
                  default=None)

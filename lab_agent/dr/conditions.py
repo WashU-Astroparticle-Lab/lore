@@ -24,7 +24,7 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .live import collect_readings, is_frozen, median
+from .live import backed_cmn_base, collect_readings, is_cmn, is_frozen, median
 
 # Any MC-labelled reading below this is taken to mean the fridge is at base.
 _BASE_MK = 300.0
@@ -177,10 +177,15 @@ def get_dr_conditions(
         end = day + timedelta(hours=24 + window_hours) - timedelta(seconds=1)
         window_desc = f"+/-{window_hours} h"
 
-    temps, _, _ = collect_readings(data_path, start, end)
-    secondary, _, _ = collect_readings(data_path, start, end, pattern="LogLCR2___*.dat")
+    dropped: dict = {}
+    dropped2: dict = {}
+    temps, _, _ = collect_readings(data_path, start, end, dropped=dropped)
+    secondary, _, _ = collect_readings(data_path, start, end, pattern="LogLCR2___*.dat",
+                                       dropped=dropped2)
     for label, pts in secondary.items():
         temps.setdefault(f"{label} (LCR2)", []).extend(pts)
+    for label, counts in dropped2.items():
+        dropped[f"{label} (LCR2)"] = counts
     not_scanned = [label for label, pts in temps.items() if not pts]
     temps = {label: pts for label, pts in temps.items() if pts}
 
@@ -237,15 +242,33 @@ def get_dr_conditions(
                       "not a measurement during it. Do not use it as the stage's temperature."]
         if not_scanned:
             lines += ["", "**Not measured in this window:** " + ", ".join(not_scanned) + ". "
-                      "The bridge took no valid reading of these channels (most likely it "
-                      "was not scanning them), so no value is given. Numbers the log shows "
-                      "for them in other channels' files are copies of older readings."]
+                      "The bridge took no valid reading of these channels (it was not "
+                      "scanning them, or every reading was uncalibrated or invalid), so no "
+                      "value is given. Numbers the log shows for them in other channels' files "
+                      "are copies of older readings."]
+        left_out = []
+        for label, counts in dropped.items():
+            for reason in ("uncalibrated", "below the sensor's range"):
+                if counts.get(reason):
+                    left_out.append(f"{counts[reason]} {reason} reading(s) of {label}")
+        if left_out:
+            lines += ["", "**Left out:** " + "; ".join(left_out) + ". An uncalibrated channel "
+                      "logs its resistance in the temperature column, and a platinum sensor "
+                      "below about 20 K reads nonsense, so neither is a temperature."]
 
         # The most important numbers: each MC thermometer at base.
         for label, pts in temps.items():
             if _MC_TAG not in label or label in frozen:
                 continue
-            base = [v for _, v in pts if v < _BASE_MK]
+            if is_cmn(label):
+                base_pts, unbacked = backed_cmn_base(temps, label)
+                base = [v for _, v in base_pts]
+                if unbacked:
+                    lines += ["", f"**{label}:** {unbacked} reading(s) below 300 mK at times "
+                              "no other thermometer was below 300 mK. A CMN salt reads about "
+                              "10 mK when warm, so those are not counted as base."]
+            else:
+                base = [v for _, v in pts if v < _BASE_MK]
             if base:
                 lines += ["", f"> **MXC base temperature, {label} (sub-300 mK readings only):** "
                               f"min {_fmt_mk(min(base))}, median {_fmt_mk(median(base))}, "

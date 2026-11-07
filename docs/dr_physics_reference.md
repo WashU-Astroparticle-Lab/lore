@@ -2,6 +2,21 @@
 
 *This document is read by the DR Analyst agent (Phase A) and by the DR-Only Report writer. It contains the physics knowledge needed to interpret dilution refrigerator data.*
 
+## How the numbers in dr_conditions.md are produced
+
+- **One log file per bridge channel.** The resistance bridge measures one channel at a time and
+  writes `LogLCR___<session>_N.dat` for channel N. Only column T<N> in that file is a
+  measurement; the other columns repeat earlier readings. Each channel's N is therefore its
+  real number of measurements, at the time each was taken.
+- **Labels come from each file's header**, and move between channels across sessions. The
+  sensor names below (CMN 172, TT-2450) are from older wiring: trust the table's labels.
+- **Left out, and said so under the table:** uncalibrated readings (the software writes the
+  resistance into the T column), platinum-sensor readings below ~20 K (outside their range),
+  and channels the bridge did not scan ("Not measured in this window").
+- **A CMN reading below 300 mK counts as base only if another thermometer agrees** within
+  ten minutes. A warm CMN still reads about 10 mK, so a CMN "base" with every resistive
+  thermometer above 300 mK is a warm fridge, not a cold one.
+
 ## What the channels mean
 
 - **MXC (CMN 172)** — the mixing chamber temperature, measured by a paramagnetic salt (CMN) thermometer. This is the most physically meaningful number: it is the temperature the chip actually sees. Valid below ~400 mK; at base typically 10–50 mK. This is the only channel that reads correctly at true base temperature — RuO2 sensors (Still, 50 mK plate) lose calibration below ~1 K and return garbage values, so their absence from the table at base is normal and expected.

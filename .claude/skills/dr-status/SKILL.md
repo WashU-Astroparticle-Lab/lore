@@ -9,14 +9,17 @@ Use when the user asks about **current** DR conditions. Read `lab_config.md` (pe
 
 ## Steps
 
-1. Run the parser with today's date and a 2-hour window:
+1. Run the parser for the last 2 hours:
    ```bash
    cd $PROJECT_ROOT
-   python run_dr.py "YYYY-MM-DD" --hours 2
+   python run_dr.py --last 2
    ```
-   (Replace YYYY-MM-DD with today's date.)
+   It prints the summary and saves nothing. (Do not use `"YYYY-MM-DD" --hours 2`: that is
+   the whole calendar day padded by 2 h, a 28-hour window, so its min and its warnings can be
+   a day old.)
 
-2. Read the output `dr_conditions.md`.
+2. Read the printed summary. A channel marked "doubtful", a "Left out" line, or a CMN note
+   means a number is not a temperature you can quote: say so rather than quoting it.
 
 3. Reply to Slack with a brief status — 3–5 lines covering:
    - MXC temperature (min and current/latest reading)

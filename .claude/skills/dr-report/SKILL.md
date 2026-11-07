@@ -14,21 +14,24 @@ cd $PROJECT_ROOT
 python run_dr.py "YYYY-MM-DD"                           # ±12 h window (default)
 python run_dr.py "YYYY-MM-DD" --hours 24                # wider window
 python run_dr.py "YYYY-MM-DD HH:MM" "YYYY-MM-DD HH:MM"  # explicit start/end
+python run_dr.py "YYYY-MM-DD" "YYYY-MM-DD"              # whole days, end day included
 ```
 
-This saves `dr_conditions.md` to `outputs/dr_YYYYMMDD/` and prints the output folder path.
+This saves `dr_conditions.md` and prints `Output folder: <path>` on its last line. Use that
+path as `<out_dir>`: a day goes to `outputs/dr_YYYYMMDD/`, an explicit window to
+`outputs/dr_<start>_<end>/`, so two reports starting the same day do not overwrite each other.
 
 ## Step B — multi-agent report generation (DR-only)
 
-3-agent pipeline — spawn agents **sequentially** (each waits for the previous), with `<out_dir>` = `$PROJECT_ROOT/outputs/dr_YYYYMMDD`:
+3-agent pipeline — spawn agents **sequentially** (each waits for the previous), with `<out_dir>` = the printed output folder, and `<name>` = its last part (e.g. `dr_20250218`):
 
 1. **`dr-analyst`** — prompt: `<out_dir> = <path>`. Writes `extracted_dr.md` (reads `docs/dr_physics_reference.md` itself).
-2. **`report-writer`** — prompt: `<out_dir> = <path>. This is a DR-only report (dr_YYYYMMDD).` Writes `[UNSIGNED] dr_YYYYMMDD.md` using the "DR-only report sections" structure in `docs/report_style_guide.md`.
+2. **`report-writer`** — prompt: `<out_dir> = <path>. This is a DR-only report (<name>).` Writes `[UNSIGNED] <name>.md` using the "DR-only report sections" structure in `docs/report_style_guide.md`.
 3. **`critic`** — prompt: `<out_dir> = <path>. This is a DR-only report.` Uses its DR-only checklist. If any item fails, one revision pass with `report-writer` in revision mode.
 
 ## Step C — upload to LabArchives
 
 ```bash
 cd $PROJECT_ROOT
-python upload_to_labarchives.py outputs/dr_YYYYMMDD
+python upload_to_labarchives.py <out_dir>
 ```

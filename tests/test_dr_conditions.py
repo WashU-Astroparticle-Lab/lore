@@ -138,6 +138,103 @@ def test_a_file_without_a_channel_number_is_read_whole_and_held_values_flagged()
     assert "MXC base temperature, TT-26006 [MC]" in md, md
 
 
+FULL_NAMES = "Date1\tDate2\tR0\tR1\tR2\tR3\tR4\tT0\tT1\tT2\tT3\tT4"
+FULL_LABELS = ("Date(String)\tDate(Number)\tC_still [Still]\t3K Plate\tMC Plate\t"
+               "TT-26006 [MC]\tCMN223 [MC P]\tC_still [Still]\t3K Plate\tMC Plate\t"
+               "TT-26006 [MC]\tCMN223 [MC P]")
+CALIBRATIONS = "\t\tNo Calibration\tRuO2\tPT1000\tTT-26006\tCMN-223\tNo Calibration\tRuO2\tPT1000\tTT-26006\tCMN-223"
+
+
+def full_row(ts, r3="12895.14", t3="76.0", t4="11.8", t2="70000", r2="1100") -> str:
+    return "\t".join([ts.strftime("%Y-%m-%d %H:%M:%S"), "3.87E+9", "1.0", "2000", r2, r3, "5",
+                      "1.9E-12", "2890", t2, t3, t4])
+
+
+def write_full(folder: Path, n: int, rows: list[str]) -> None:
+    (folder / f"{SESSION}_{n}.dat").write_text(
+        "\n".join(["#", "", FULL_NAMES, FULL_LABELS, CALIBRATIONS] + rows) + "\n", encoding="utf-8")
+
+
+def test_an_uncalibrated_channel_is_not_reported_as_a_temperature():
+    # 2026-07-27: TT-26006 had no calibration, so the log held its resistance in the T column
+    # and "2.2 kOhm" was reported as 2.2 K. From 15:13 it was calibrated: those rows count.
+    t0 = DAY + timedelta(hours=13)
+    rows = [full_row(t0 + timedelta(minutes=i), r3=f"{2220.5 + i}", t3=f"{2220.5 + i}")
+            for i in range(10)]
+    rows += [full_row(t0 + timedelta(minutes=10 + i), r3=f"{12895 + i}", t3=f"{76 - i}.0")
+             for i in range(5)]
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write_full(d, 3, rows)
+        md = get_dr_conditions(d, DAY, window_hours=0)
+    assert "| TT-26006 [MC] | 72.0 mK | 74.0 mK | 76.0 mK |" in md, md
+    assert "**Left out:** 10 uncalibrated reading(s) of TT-26006 [MC]" in md, md
+    assert "2.220 K" not in md
+
+
+def test_a_platinum_sensor_below_its_range_is_left_out():
+    t0 = DAY + timedelta(hours=1)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write_full(d, 2, [full_row(t0 + timedelta(minutes=i), t2=t2)
+                          for i, t2 in enumerate(["60.79", "189.0", "45000", "52000"])])
+        md = get_dr_conditions(d, DAY, window_hours=0)
+    assert "| MC Plate | 45.0 K | 48.5 K | 52.0 K |" in md, md
+    assert "2 below the sensor's range reading(s) of MC Plate" in md, md
+
+
+def test_a_warm_cmn_is_not_called_base():
+    # 2026-07-27: "MXC base temperature, CMN223: min 9.4 mK" while the RuOx read 0.4-3.3 K.
+    t0 = DAY + timedelta(hours=13)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write_full(d, 3, [full_row(t0 + timedelta(minutes=2 * i), t3="1500.0") for i in range(10)])
+        write_full(d, 4, [full_row(t0 + timedelta(minutes=2 * i, seconds=30), t4="9.5")
+                          for i in range(10)])
+        warm = get_dr_conditions(d, DAY, window_hours=0)
+        write_full(d, 3, [full_row(t0 + timedelta(minutes=2 * i), t3="38.0") for i in range(10)])
+        cold = get_dr_conditions(d, DAY, window_hours=0)
+    assert "MXC base temperature, CMN223" not in warm, warm
+    assert "**CMN223 [MC P]:** 10 reading(s) below 300 mK" in warm, warm
+    assert "MXC base temperature, CMN223 [MC P] (sub-300 mK readings only):** min 9.5 mK" in cold, cold
+
+
+def test_one_thermometer_exports_from_its_own_file():
+    from lab_agent.dr.live import channel_series
+
+    t0 = DAY + timedelta(hours=10)
+    tt = [f"{40 + i}.0E+0" for i in range(4)]
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write(d, f"{SESSION}_3.dat", [row(t0 + timedelta(seconds=20 * i), tt=tt[i]) for i in range(4)])
+        write(d, f"{SESSION}_4.dat", [row(t0 + timedelta(seconds=20 * i + 10), tt=tt[i]) for i in range(4)])
+        by_label = channel_series(d, t0, t0 + timedelta(minutes=5), "tt-26006 [mc]")
+        by_number = channel_series(d, t0, t0 + timedelta(minutes=5), "T3")
+        nothing = channel_series(d, t0, t0 + timedelta(minutes=5), "no such sensor")
+    assert [ts.second for ts, _ in by_label["readings"]] == [0, 20, 40, 0], by_label
+    assert by_label["files"] == [f"{SESSION}_3.dat"] and by_label["channels"] == {3}
+    assert by_number["readings"] == by_label["readings"]
+    assert nothing["files"] == [] and nothing["readings"] == []
+
+
+def test_run_dr_windows_mean_what_they_say():
+    from lab_agent.cli import run_dr
+
+    now = datetime(2026, 11, 6, 17, 0)
+    last = run_dr.parse_args(["--last", "2"], now=now)
+    assert (last["mode"], last["start"], last["end"]) == ("last", datetime(2026, 11, 6, 15), now)
+    days = run_dr.parse_args(["2025-02-17", "2025-02-19"])
+    assert days["end"] == datetime(2025, 2, 19, 23, 59, 59), "the end day must be included"
+    timed = run_dr.parse_args(["2025-02-18 14:00", "--hours", "6"])
+    assert (timed["start"], timed["end"]) == (datetime(2025, 2, 18, 14), datetime(2025, 2, 18, 20))
+    day = run_dr.parse_args(["2025-02-18"])
+    assert day["mode"] == "day" and day["hours"] == 12
+    csv = run_dr.parse_args(["2026-10-29 13:00", "2026-10-29 19:00", "--csv", "RuOx12980"])
+    assert csv["csv"] == "RuOx12980" and csv["mode"] == "window"
+    assert run_dr._folder_for(day).name == "dr_20250218"
+    assert run_dr._folder_for(timed).name == "dr_20250218-1400_20250218-2000"
+
+
 def test_the_channel_comes_from_the_file_name():
     assert file_channel("LogLCR___2026-10-28-08-45-29_5.dat") == 5
     assert file_channel("LogLCR2___2025-01-27-17-44-48_0.dat") == 0
