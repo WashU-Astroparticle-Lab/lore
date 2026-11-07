@@ -35,6 +35,17 @@ The following keys must be present in `.env`. The agent checks these by name:
 | SSO institution label | Exact institution name in the LabArchives login dropdown |
 | SSO form prefix | CSS id prefix of your SSO username/password/submit fields, e.g. `#myLogin_` |
 
+## Slack archive (optional)
+
+Figures posted in these Slack channels are summarised by LORE and archived to LabArchives, one
+page per week, in a subfolder of the upload folder (see `lab_agent/slack/archive.py`). Leave
+the channels row empty to turn the archive off.
+
+| Key | Value |
+|-----|-------|
+| Slack archive channels | Public channel names, comma-separated, e.g. `data_analysis, dr-cooldown` |
+| Slack archive folder | Subfolder of the upload folder for the week pages, e.g. `Slack` |
+
 ## Security (optional)
 
 | Key | Value |

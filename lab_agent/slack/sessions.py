@@ -538,6 +538,34 @@ _KG_EXIT_MEANING = {0: "ok", 3: "SKIPPED, RAG packages missing (wrong Python?)",
                     5: "partial, some pages not indexed (see the log)"}
 
 
+SLACK_ARCHIVE_TIMEOUT_S = 2 * 3600
+
+
+def _run_slack_archive() -> None:
+    """Run the daily Slack archive (lab_agent.cli.slack_archive) as a bounded subprocess."""
+    child_env = os.environ.copy()
+    for _var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+        child_env.pop(_var, None)
+    logs_dir = PROJECT_ROOT / "session_logs"
+    logs_dir.mkdir(exist_ok=True)
+    log_path = logs_dir / "slack_archive.log"
+    with open(log_path, "a", encoding="utf-8") as log:
+        log.write(f"\n=== Slack archive started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        log.flush()
+        proc = subprocess.Popen([sys.executable, "-m", "lab_agent.cli.slack_archive"],
+                                cwd=str(PROJECT_ROOT), stdout=log, stderr=log, env=child_env)
+        try:
+            proc.wait(timeout=SLACK_ARCHIVE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            proc.wait(timeout=60)
+            log.write("\n=== Slack archive killed after 2 h ===\n")
+    outcome = {0: "ok", 5: "partial, some discussions not posted (see the log)"}.get(
+        proc.returncode, "failed")
+    print(f"[slack-archive] finished: {outcome} (exit {proc.returncode}); log: {log_path.name}",
+          flush=True)
+
+
 def _run_kg_refresh() -> None:
     """Run one incremental KG refresh as a subprocess (plan auth, not API)."""
     # Same env scrub as session spawns: the build LLM (`claude -p`) must use the
@@ -593,6 +621,12 @@ def kg_refresh_loop(hour: int | None = None) -> None:
         today = (now.tm_year, now.tm_mon, now.tm_mday)
         if now.tm_hour == hour and today != last_run_date:
             last_run_date = today
+            # Archive the day's Slack figures first, so their week pages are in LabArchives
+            # when the refresh crawls it and flow into the graph in this same run.
+            try:
+                _run_slack_archive()
+            except Exception as exc:  # noqa: BLE001 — a failed archive must not skip the refresh
+                print(f"[slack-archive] run failed: {exc}", flush=True)
             print("[kg-refresh] nightly window reached — starting incremental build", flush=True)
             try:
                 _run_kg_refresh()

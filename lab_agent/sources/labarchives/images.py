@@ -79,6 +79,10 @@ def extract_embedded_img_urls(xml_text: str) -> list[str]:
             continue
         for m in re.finditer(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE):
             src = m.group(1).strip()
+            # An image posted through the API stays a data: URI in the page HTML. It is not a
+            # URL to fetch, and one figure is hundreds of kB of text in the figure manifest.
+            if src.lower().startswith("data:"):
+                continue
             if src and src not in seen:
                 urls.append(src)
                 seen.add(src)

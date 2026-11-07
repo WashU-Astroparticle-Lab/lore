@@ -57,8 +57,10 @@ def main() -> None:
 def _gather_corpus() -> dict[str, str]:
     """Collect {doc_id: text} for the KG — LabArchives pages only.
 
-    Deliberately excludes `knowledge/experiments/` (LORE-generated report summaries):
-    the graph reflects the lab's own LabArchives notes only, not LORE's output.
+    Deliberately excludes `knowledge/experiments/` (LORE-generated report summaries): the
+    graph reflects the lab's own LabArchives notes, not LORE's reports. The one exception
+    is the Slack archive's week pages (crawled from the upload folder's Slack subfolder):
+    LORE writes them, but they are the only record of what the lab said in Slack.
     """
     from ..config import KNOWLEDGE_ROOT
 

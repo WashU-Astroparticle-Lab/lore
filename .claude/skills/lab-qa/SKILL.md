@@ -36,3 +36,5 @@ For two sub-capabilities this skill delegates (single source of truth — don't 
 6. **Ambiguous or truly absent → clarify, don't guess.** If nothing (graph, candidates, or figures) matches, say so plainly and **offer** to run a full report (which does need cookies) — do not fabricate, silently start fetching, or trigger a cookie refresh.
 
 (The graph is refreshed by `python -m lab_agent.cli.build_kb --index` on a schedule; new experiments also enter it at report time.)
+
+**Slack archive pages.** The graph also holds pages titled "Slack — Week of …" (`la_page:Slack_Week_of_…`): LORE's own weekly summaries of figures and discussions posted in the lab's Slack channels, kept after Slack's 90-day limit deletes the originals. They are machine-written and unreviewed, and they never quote anyone. When an answer rests on one, say so: "from LORE's summary of a #data_analysis discussion, week of Oct 26", not "the notebook says". The original figures are attached to those pages; the local copies are under `knowledge/slack_capture/<channel>/files/`.

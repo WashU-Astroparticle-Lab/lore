@@ -91,6 +91,9 @@ def load_safe_settings(env_path: Path | None = None) -> list[str]:
 
 def provenance(source: str, filename: str = "") -> str:
     """Who wrote a result, so the calling agent can weigh it."""
+    if source.lower().startswith("la_page:slack_week_of"):
+        return ("LORE's weekly summary of Slack discussions and their figures (machine-written, "
+                "not reviewed; no message quoted)")
     if source.startswith("la_page:"):
         return HUMAN_PAGE
     if source.startswith("knowledge:"):

@@ -43,18 +43,22 @@ def _la_image_id(url: str) -> str:
 
 def _enumerate_pages(adapter, nbid: str, parent: str = "0", depth: int = 0,
                      out: list | None = None, exclude: set[str] | None = None,
-                     failures: list | None = None) -> list[tuple[str, str]]:
+                     failures: list | None = None, include_within: set[str] | None = None
+                     ) -> list[tuple[str, str]]:
     """Recursively collect (display_title, tree_id) for every page in a notebook.
 
-    *exclude* is a set of lowercased folder display-texts to skip entirely (e.g. the
-    "AI Agent" upload folder — we don't index LORE's own reports). One retry on a
-    transient tree-level failure so a hiccup doesn't silently drop a whole subtree; a
-    subtree that still fails is logged and recorded in *failures*, so the crawl is known
-    to be partial and nothing is pruned on its account.
+    *exclude* is a set of lowercased folder display-texts to skip (e.g. the "AI Agent"
+    upload folder — we don't index LORE's own reports). *include_within* names subfolders
+    of an excluded folder that are crawled anyway: the Slack archive lives in the upload
+    folder, and its week pages belong in the graph while the reports beside them do not.
+    One retry on a transient tree-level failure so a hiccup doesn't silently drop a whole
+    subtree; a subtree that still fails is logged and recorded in *failures*, so the crawl
+    is known to be partial and nothing is pruned on its account.
     """
     if out is None:
         out = []
     exclude = exclude or set()
+    include_within = include_within or set()
     if depth > 12:
         return out
     try:
@@ -74,14 +78,30 @@ def _enumerate_pages(adapter, nbid: str, parent: str = "0", depth: int = 0,
         if is_page:
             if display and b64:
                 out.append((display, b64))
-        elif b64 and display.lower() not in exclude:   # don't descend into excluded folders
-            _enumerate_pages(adapter, nbid, b64, depth + 1, out, exclude, failures)
+        elif b64 and display.lower() not in exclude:
+            _enumerate_pages(adapter, nbid, b64, depth + 1, out, exclude, failures,
+                             include_within)
+        elif b64 and include_within:
+            # An excluded folder: skip its pages, crawl only the named subfolders in it.
+            try:
+                inner = adapter._get_tree_level(nbid, b64)
+            except Exception as exc:
+                print(f"[la_crawl] could not list folder {display!r}: {exc}")
+                if failures is not None:
+                    failures.append(b64)
+                continue
+            for sub in inner:
+                name = (sub.findtext("display-text") or "").strip()
+                sid = sub.findtext("tree-id") or ""
+                if sid and sub.findtext("is-page") != "true" and name.lower() in include_within:
+                    _enumerate_pages(adapter, nbid, sid, depth + 2, out, set(), failures)
     return out
 
 
 def crawl(adapter=None, notebooks: list[str] | None = None,
           max_pages: int | None = None, exclude_folders: set[str] | None = None,
-          images_out: dict | None = None, status_out: dict | None = None) -> list[dict]:
+          images_out: dict | None = None, status_out: dict | None = None,
+          include_within: set[str] | None = None) -> list[dict]:
     """Return [{notebook, page, nbid, tree_id, text}, …] for LabArchives pages.
 
     *adapter* is injected for testing; in production a real LabArchivesAdapter is used
@@ -92,6 +112,7 @@ def crawl(adapter=None, notebooks: list[str] | None = None,
     """
     adapter = adapter or LabArchivesAdapter("__crawl__")
     exclude = {f.strip().lower() for f in (exclude_folders or set()) if f.strip()}
+    within = {f.strip().lower() for f in (include_within or set()) if f.strip()}
     nbs = adapter._list_notebooks()
     if notebooks:
         wanted = {n.strip().lower() for n in notebooks}
@@ -105,7 +126,7 @@ def crawl(adapter=None, notebooks: list[str] | None = None,
     for nb in nbs:
         nbid = nb["nbid"]
         for display, tree_id in _enumerate_pages(adapter, nbid, exclude=exclude,
-                                                 failures=failures):
+                                                 failures=failures, include_within=within):
             if max_pages is not None and len(corpus) >= max_pages:
                 truncated = True
                 break
@@ -243,8 +264,12 @@ def crawl_to_bundle(notebooks: list[str] | None = None, max_pages: int | None = 
         exclude_folders = {upload} if upload else set()
     images_out: dict = {}
     status: dict = {}
+    # The Slack archive's week pages sit in a subfolder of the upload folder; they are the
+    # one part of it the graph indexes.
+    slack = lab_config_value("Slack archive folder", "Slack").strip()
     corpus = crawl(adapter=adapter, notebooks=notebooks, max_pages=max_pages,
-                   exclude_folders=exclude_folders, images_out=images_out, status_out=status)
+                   exclude_folders=exclude_folders, images_out=images_out, status_out=status,
+                   include_within={slack} if slack else set())
     n = write_corpus(corpus)
     # Complete = the usual scope, uncapped, every folder listed. Only then is a page that
     # was not seen known to be gone; a partial crawl prunes nothing.

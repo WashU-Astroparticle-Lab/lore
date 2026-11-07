@@ -155,8 +155,23 @@ def _notebook_url(nbid: str) -> str:
     return f"https://mynotebook.labarchives.com/{nbid}"
 
 
-def _insert_page(nbid: str, parent_tree_id: str, title: str) -> str:
-    """Create a new page and return its tree_id."""
+def find_child(adapter, nbid: str, parent_tree_id: str, title: str, folder: bool) -> str | None:
+    """The tree_id of the folder (or page) named *title* directly under *parent*, or None."""
+    want = title.strip().lower()
+    for node in adapter._get_tree_level(nbid, parent_tree_id):
+        is_page = node.findtext("is-page") == "true"
+        if (node.findtext("display-text") or "").strip().lower() == want and is_page != folder:
+            return node.findtext("tree-id") or None
+    return None
+
+
+def _insert_folder(nbid: str, parent_tree_id: str, title: str) -> str:
+    """Create a new folder and return its tree_id."""
+    return _insert_page(nbid, parent_tree_id, title, folder=True)
+
+
+def _insert_page(nbid: str, parent_tree_id: str, title: str, folder: bool = False) -> str:
+    """Create a new page (or, with folder=True, a folder) and return its tree_id."""
     xml_text = _post(
         "/api/tree_tools/insert_node",
         "insert_node",
@@ -164,7 +179,7 @@ def _insert_page(nbid: str, parent_tree_id: str, title: str) -> str:
             "nbid": nbid,
             "parent_tree_id": parent_tree_id,
             "display_text": title,
-            "is_folder": "false",
+            "is_folder": "true" if folder else "false",
         },
     )
     root = ET.fromstring(xml_text)
