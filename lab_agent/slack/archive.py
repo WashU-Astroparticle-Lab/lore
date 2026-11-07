@@ -703,6 +703,7 @@ def run(*, src=None, target=None, now: float | None = None, capture_days: int = 
     root = root or capture_dir()
     src = src or SlackSource()
     state = load_state(state_file)
+    state.pop("names_unavailable", None)         # once per run: the scope may have been added
     log: list[str] = []
     saver = (lambda s: None) if preview_dir else (lambda s: save_state(s, state_file))
 

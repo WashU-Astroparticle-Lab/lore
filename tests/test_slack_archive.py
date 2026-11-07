@@ -252,6 +252,22 @@ def test_a_late_reply_becomes_an_update_on_the_same_week_page():
         assert "Earlier summary" in prompts[0] and "re-measured at base" in prompts[0]
 
 
+def test_names_are_looked_up_again_once_the_scope_is_added():
+    class NoScope(FakeSlack):
+        def user_name(self, uid):
+            raise A.MissingScope("users:read")
+
+    with tempfile.TemporaryDirectory() as tmp, patched(A, channels_configured=lambda: ["data_analysis"]):
+        root, sf, prompts = Path(tmp) / "cap", _state_file(tmp), []
+        ask = lambda p, i: prompts.append(p) or fake_summary(p, i)
+        A.run(src=NoScope(MESSAGES[:3]), target=FakeLA(), now=T0 + 86400, ask=ask, root=root,
+              state_file=sf, capture_days=5, window_days=5)
+        assert A.load_state(sf).get("names_unavailable")
+        A.run(src=FakeSlack(MESSAGES), target=FakeLA(), now=T0 + 2 * 86400, ask=ask,
+              root=root, state_file=sf, capture_days=5, window_days=5)
+        assert "Alice" in prompts[-1], "the first run's missing scope stuck for good"
+
+
 def test_preview_posts_nothing_and_saves_no_state():
     with tempfile.TemporaryDirectory() as tmp, patched(A, channels_configured=lambda: ["data_analysis"]):
         root, sf, out = Path(tmp) / "cap", _state_file(tmp), Path(tmp) / "preview"
