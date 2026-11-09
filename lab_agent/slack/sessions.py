@@ -1041,6 +1041,26 @@ def _launch(
     _progress_tick()   # sets the DM "thinking" status now, not at the next reaper pass
 
 
+GUARDED_TOOLS = "Bash|PowerShell|Read|Grep|Glob|Edit|Write|NotebookEdit"
+
+
+def session_settings() -> Path:
+    """The settings file every Slack session is started with: the hook that keeps it off
+    the raw fridge logs (lab_agent/slack/session_guard.py).
+
+    Passed with --settings rather than kept in .claude/settings.json, so it binds LORE's
+    sessions only and not a person working in this folder.
+    """
+    guard = Path(__file__).with_name("session_guard.py")
+    hook = {"type": "command",
+            "command": f'"{Path(sys.executable).as_posix()}" "{guard.as_posix()}"'}
+    path = REPLY_DIR / "session_settings.json"
+    REPLY_DIR.mkdir(exist_ok=True)
+    path.write_text(json.dumps({"hooks": {"PreToolUse": [
+        {"matcher": GUARDED_TOOLS, "hooks": [hook]}]}}, indent=1), encoding="utf-8")
+    return path
+
+
 def _spawn_into(slot: dict, prompt: str, *, user: str, channel: str, session_id: str,
                 resume_id: str | None) -> None:
     """Write the prompt, start claude, and fill the reserved slot."""
@@ -1072,12 +1092,14 @@ def _spawn_into(slot: dict, prompt: str, *, user: str, channel: str, session_id:
         claude_session_id = str(uuid.uuid4())
         session_flags = f"--session-id {claude_session_id}"
 
+    settings = session_settings()
     with open(session_log, "w") as log:
         log.write(f"=== Session {session_id}: user={user} channel={channel} "
                   f"claude_session={claude_session_id} resumed={bool(resume_id)} ===\n")
         proc = subprocess.Popen(
             f'claude --dangerously-skip-permissions --output-format text '
-            f'--model claude-sonnet-4-6 {session_flags} < "{prompt_file}"',
+            f'--model claude-sonnet-4-6 --settings "{settings}" {session_flags} '
+            f'< "{prompt_file}"',
             shell=True,
             cwd=str(PROJECT_ROOT),
             stdout=log,

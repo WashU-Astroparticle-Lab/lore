@@ -272,39 +272,100 @@ def backed_cmn_base(readings: dict[str, list[tuple[datetime, float]]], label: st
     return backed, unbacked
 
 
-def _matches(label: str, wanted: str) -> bool:
-    return label.strip().lower() == wanted.strip().lower()
+def _header(f: Path) -> tuple[list[str], list[str]] | None:
+    """A channel file's column names and labels, or None for a header-less stub."""
+    with f.open("r", encoding="utf-8", errors="replace") as fh:
+        head = [fh.readline() for _ in range(4)]
+    if not head[3].startswith("Date(String)"):
+        return None
+    return ([x.strip() for x in head[2].rstrip("\r\n").split("\t")],
+            [x.strip() for x in head[3].rstrip("\r\n").split("\t")])
+
+
+def channel_map(root: Path, start: datetime, end: datetime, pattern: str = LCR_GLOB
+                ) -> dict[int, dict]:
+    """{channel: {"labels": {...}, "measured": bool}} for the logs written in the window.
+
+    Channels are numbered as the logger numbers them, from 0: file ``_N.dat``, column
+    ``TN``. "measured" means the channel has its own file in the window. People count them
+    differently: a lab member asked for "channel 4" meaning TT-26006, which is channel 3,
+    and got the CMN223 on channel 4. So a CSV says which thermometer each number is.
+    """
+    out: dict[int, dict] = {}
+    for f in _window_files(root, start, end, pattern):
+        n = file_channel(f.name)
+        hdr = _header(f) if n is not None else None
+        if hdr is None:
+            continue
+        names, labels = hdr
+        for i, name in enumerate(names):
+            m = re.fullmatch(r"T(\d)", name)
+            if m and i < len(labels) and _is_thermometer(labels[i]):
+                ch = out.setdefault(int(m.group(1)), {"labels": set(), "measured": False})
+                ch["labels"].add(labels[i])
+        if n in out:
+            out[n]["measured"] = True
+    return out
+
+
+def _resolve(wanted: str, files: list[tuple[Path, int, str]]) -> tuple[set, str | list[str]]:
+    """The (channel, label) pairs ``wanted`` names, and how it named them: "number",
+    "label" or "partial"; or, for a partial name that fits several labels, those labels."""
+    number = re.fullmatch(r"[Tt]?(\d)", wanted.strip())
+    if number:
+        n = int(number.group(1))
+        return {(c, lab) for _, c, lab in files if c == n}, "number"
+    w = wanted.strip().lower()
+    exact = {(c, lab) for _, c, lab in files if lab.lower() == w}
+    if exact:
+        return exact, "label"
+    partial = {(c, lab) for _, c, lab in files if w and w in lab.lower()}
+    labels = sorted({lab for _, lab in partial})
+    if len(labels) > 1:
+        return set(), labels
+    return partial, "partial"
+
+
+def _empty_series(pattern: str = LCR_GLOB) -> dict:
+    return {"readings": [], "labels": set(), "channels": set(), "files": [], "dropped": {},
+            "pattern": pattern, "matched_by": None, "ambiguous": [], "map": {}}
 
 
 def channel_series(root: Path, start: datetime, end: datetime, wanted: str) -> dict:
     """One thermometer's readings for a CSV, from its own log file only.
 
-    ``wanted`` is a label ("RuOx12980") or a channel ("5", "T5"). Labels move between
-    channels from one session to the next, so a label is matched in each file's header.
-    Agents used to write their own extraction instead, and each one merged every channel
-    file: a channel-4 CSV sent to a lab member had 3,747 rows for about 1,250 measurements.
+    ``wanted`` is a label ("RuOx12980"), part of one if only one label contains it ("TT"),
+    or a channel ("5", "T5"). Labels move between channels from one session to the next,
+    so a label is matched in each file's header. Agents used to write their own extraction
+    instead, and each one merged every channel file: a channel-4 CSV sent to a lab member
+    had 3,747 rows for about 1,250 measurements.
 
     Returns {"readings": [(ts, mK)], "labels": {...}, "channels": {...}, "files": [...],
-    "dropped": {reason: n}, "pattern": glob}.
+    "dropped": {reason: n}, "pattern": glob, "matched_by": "number" | "label" | "partial",
+    "ambiguous": [labels a partial name fits], "map": channel_map(...)}.
     """
-    number = re.fullmatch(r"[Tt]?(\d)", wanted.strip())
     for pattern in (LCR_GLOB, "LogLCR2___*.dat"):
-        out = {"readings": [], "labels": set(), "channels": set(), "files": [],
-               "dropped": {}, "pattern": pattern}
+        files = []
         for f in _window_files(root, start, end, pattern):
             n = file_channel(f.name)
-            if n is None:
+            hdr = _header(f) if n is not None else None
+            if hdr is None:
                 continue
-            with f.open("r", encoding="utf-8", errors="replace") as fh:
-                head = [fh.readline() for _ in range(4)]
-            names = [x.strip() for x in head[2].rstrip("\r\n").split("\t")]
-            labels = head[3].rstrip("\r\n").split("\t")
+            names, labels = hdr
             col = names.index(f"T{n}") if f"T{n}" in names else None
-            if col is None or col >= len(labels):
-                continue
-            label = labels[col].strip()
-            hit = int(number.group(1)) == n if number else _matches(label, wanted)
-            if not hit:
+            if col is not None and col < len(labels):
+                files.append((f, n, labels[col]))
+        if not files:
+            continue
+        out = _empty_series(pattern)
+        out["map"] = channel_map(root, start, end, pattern)
+        hits, how = _resolve(wanted, files)
+        if isinstance(how, list):
+            out["ambiguous"] = how
+            return out
+        out["matched_by"] = how
+        for f, n, label in files:
+            if (n, label) not in hits:
                 continue
             dropped: dict = {}
             chunk = read_lcr_file(f, start, end, n, dropped)
@@ -319,8 +380,52 @@ def channel_series(root: Path, start: datetime, end: datetime, wanted: str) -> d
         if out["files"]:
             out["readings"].sort()
             return out
-    return {"readings": [], "labels": set(), "channels": set(), "files": [], "dropped": {},
-            "pattern": LCR_GLOB}
+    return _empty_series()
+
+
+MC_TAG = "[MC"
+
+
+def cmn_comparison(root: Path, start: datetime, end: datetime, label: str,
+                   readings: list[tuple[datetime, float]]) -> dict | None:
+    """How a CMN channel compares with a resistive mixing-chamber thermometer read at the
+    same times while that one was off base; None if ``label`` is not a CMN.
+
+    A CMN salt only reads correctly near base. On 2026-10-29 a lab member heated the MC to
+    1000 mK and was sent the CMN223: TT-26006 [MC] and the RuOx read about 1000 mK while the
+    CMN read 1e4-5e5 mK. Warm, a CMN can also read about 10 mK. Neither shows in the CMN's
+    own column, so it is set beside a resistive one. Returns {"reference": label or None,
+    "channel", "paired", "off_base", "ratio_min", "ratio_median", "ratio_max"}.
+    """
+    if not is_cmn(label):
+        return None
+    refs = sorted((n, lab) for n, ch in channel_map(root, start, end).items()
+                  if ch["measured"] for lab in ch["labels"] if MC_TAG in lab and not is_cmn(lab))
+    best: dict = {"reference": None, "paired": -1}
+    for n, ref in refs:
+        pts = channel_series(root, start, end, ref)["readings"]
+        times = [t for t, _ in pts]
+        paired, ratios = 0, []
+        for ts, v in readings:
+            i = bisect.bisect_left(times, ts)
+            near = [j for j in (i - 1, i) if 0 <= j < len(pts)]
+            if not near:
+                continue
+            j = min(near, key=lambda k: abs(times[k] - ts))
+            if abs(times[j] - ts) > _BACKUP_WINDOW:
+                continue
+            paired += 1
+            if pts[j][1] >= BASE_MK:
+                ratios.append(v / pts[j][1])
+        if paired > best["paired"]:
+            ratios.sort()
+            best = {"reference": ref, "channel": n, "paired": paired, "off_base": len(ratios),
+                    "ratio_min": ratios[0] if ratios else None,
+                    "ratio_median": median(ratios) if ratios else None,
+                    "ratio_max": ratios[-1] if ratios else None}
+    if best["reference"] is None:
+        best["paired"] = 0
+    return best
 
 
 def recent_thermometry(data_path: str | Path, start: datetime, end: datetime) -> dict:

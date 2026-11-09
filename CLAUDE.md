@@ -173,7 +173,7 @@ All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from 
 | Slack (post/post-summary/upload/read-thread/channels/search/fetch-files) | `python -m lab_agent.cli.slack <cmd>` — see the Slack section above. **A report's summary goes out via `post-summary --run outputs/<id>`, never `post`** — it reads the gated `slack_summary.md` and takes no message text |
 | DR conditions | `python run_dr.py "YYYY-MM-DD" [--hours N]`, or `"<start>" "<end>"`; the current state: `python run_dr.py --last 2` (prints, saves nothing) |
 | Slack figure archive | `python -m lab_agent.cli.slack_archive` (the daily run; the listener runs it before the graph refresh). `--preview <dir>` writes the summaries locally without posting; `--backfill --limit N` posts the oldest N. Weekly pages land in `$UPLOAD_FOLDER / Slack` |
-| **One thermometer's readings as a file** | `python run_dr.py "<start>" "<end>" --csv "<label or channel>"` — e.g. `--csv RuOx12980` or `--csv 5`. One row per real measurement. **Never parse LogLCR files yourself** (see below) |
+| **One thermometer's readings as a file** | `python run_dr.py "<start>" "<end>" --csv "<label, part of one, or channel>"` — e.g. `--csv RuOx12980`, `--csv TT` or `--csv 5`. One row per real measurement; the file and its column name the thermometer. **Never parse LogLCR files yourself** (see below) |
 | Disk footprint / retention | `python -m lab_agent.cli.cleanup` (dry run) then `--caches` / `--images` / `--logs` / `--all`. Policy in `lab_agent/retention.py`: the record (reports, extractions, critiques, provenance, metadata, corpus) is never auto-deleted; figures are reclaimed only once the report is uploaded AND the run has been idle for a week. Reading a figure marks it in use, so anything under discussion stays on disk |
 
 ## Fridge logs: use run_dr.py, never your own parser
@@ -189,7 +189,21 @@ too many rows, one with an "in calibration" range nobody had measured.
 
 When you give fridge data to someone, say where it came from, as `run_dr.py --csv` prints it:
 the thermometer label and channel, the window, how many readings, and what was left out. Never
-add a validity range or flag of your own.
+add a validity range or flag of your own. A `NOTE:` line it prints goes in your reply word for
+word: for a CMN it says how the CMN compares with the MC's resistive thermometer.
+
+**Channel numbers are the logger's, counted from 0** (file `_N.dat`, column `TN`), and
+`--csv` prints the whole list. People count differently. A lab member asked for "channel 4"
+and meant TT-26006, which is channel 3; they got the CMN223 on channel 4 and plotted it heated to
+1000 mK, where a CMN salt reads 10⁴–10⁵ mK. So:
+- Always name the thermometer, not just the number: "channel 4 is CMN223 [MC P], the CMN salt".
+- If a request gives a number and a name that disagree ("TT, channel 4"), say so and send both.
+- If someone asks for a CMN over a window where the fridge was off base, the `NOTE:` says which
+  thermometer to use instead. Offer that one too.
+
+Slack sessions are started with a hook (`lab_agent/slack/session_guard.py`) that refuses any
+tool call naming a LogLCR file or the data folder. If you see its "Blocked:" message, use
+`run_dr.py`; do not look for another way in.
 
 ## Known limitation
 Web app page IDs (e.g. `11400322`) do **not** map to API tree_ids. Pass page titles or base64 tree_ids instead. There is therefore **no per-page deep link** — when telling someone where a report is, give the notebook URL printed by the upload command plus "$UPLOAD_FOLDER / \<page title\>". Never invent, shorten, or elide a URL: a fabricated GitHub link in a draft channel message 404'd for the whole lab.

@@ -217,6 +217,71 @@ def test_one_thermometer_exports_from_its_own_file():
     assert nothing["files"] == [] and nothing["readings"] == []
 
 
+def test_part_of_a_name_finds_one_thermometer_or_says_which_it_could_be():
+    from lab_agent.dr.live import channel_series
+
+    t0 = DAY + timedelta(hours=10)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write(d, f"{SESSION}_3.dat", [row(t0 + timedelta(seconds=20 * i)) for i in range(3)])
+        write(d, f"{SESSION}_4.dat", [row(t0 + timedelta(seconds=20 * i + 10)) for i in range(3)])
+        tt = channel_series(d, t0, t0 + timedelta(minutes=5), "TT")
+        mc = channel_series(d, t0, t0 + timedelta(minutes=5), "MC")
+    assert tt["channels"] == {3} and tt["matched_by"] == "partial", tt
+    assert mc["readings"] == [] and mc["ambiguous"] == ["CMN223 [MC P]", "TT-26006 [MC]"], mc
+    assert {n: c["measured"] for n, c in tt["map"].items()} == {
+        1: False, 2: False, 3: True, 4: True, 6: False}, tt["map"]
+
+
+def _export(d: Path, start: datetime, end: datetime, wanted: str) -> tuple[str, Path]:
+    import contextlib
+    import io
+
+    from lab_agent.cli import run_dr
+
+    out, saved = io.StringIO(), run_dr.OUTPUT_ROOT
+    run_dr.OUTPUT_ROOT = str(d / "out")
+    try:
+        with contextlib.redirect_stdout(out):
+            run_dr._write_csv(str(d), {"start": start, "end": end, "csv": wanted, "hours": None})
+    finally:
+        run_dr.OUTPUT_ROOT = saved
+    (csv_file,) = (d / "out" / "dr_csv").glob("*.csv")
+    return out.getvalue(), csv_file
+
+
+def test_a_csv_names_its_thermometer_and_a_warm_cmn_points_to_the_mc_thermometer():
+    # 2026-11-06: asked for "channel 4", a lab member got "4_….csv" with a temperature_mK
+    # column, took it for the TT-26006 and plotted the CMN223 heated to 1000 mK: 1e4-5e5 mK.
+    t0 = DAY + timedelta(hours=10)
+    warm = [(40, 12), (40, 12), (1000, 5000), (1000, 90000)]
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write(d, f"{SESSION}_3.dat", [row(t0 + timedelta(minutes=i), tt=f"{tt}.0")
+                                      for i, (tt, _) in enumerate(warm)])
+        write(d, f"{SESSION}_4.dat", [row(t0 + timedelta(minutes=i, seconds=10), cmn=f"{c}.0")
+                                      for i, (_, c) in enumerate(warm)])
+        said, f = _export(d, t0, t0 + timedelta(minutes=10), "4")
+        header = f.read_text(encoding="utf-8").splitlines()[0]
+    assert f.name == "ch4_CMN223-MC-P_20260924-1000_20260924-1010.csv", f.name
+    assert header == "timestamp,CMN223 [MC P] (mK)", header
+    assert "CMN223 [MC P]: channel 4 (column T4)" in said, said
+    assert "3 TT-26006 [MC], 4 CMN223 [MC P] measured" in said, said
+    assert "read above 300 mK at 2 of these 4 readings" in said and "5.0x to 90x" in said, said
+    assert "use TT-26006 [MC] (channel 3)" in said, said
+
+
+def test_a_cmn_at_base_is_not_warned_about():
+    t0 = DAY + timedelta(hours=10)
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write(d, f"{SESSION}_3.dat", [row(t0 + timedelta(minutes=i), tt="38.0") for i in range(4)])
+        write(d, f"{SESSION}_4.dat", [row(t0 + timedelta(minutes=i, seconds=10), cmn="11.8")
+                                      for i in range(4)])
+        said, _ = _export(d, t0, t0 + timedelta(minutes=10), "CMN223 [MC P]")
+    assert "stayed below 300 mK throughout" in said and "use TT" not in said, said
+
+
 def test_run_dr_windows_mean_what_they_say():
     from lab_agent.cli import run_dr
 

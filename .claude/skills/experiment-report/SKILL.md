@@ -83,34 +83,16 @@ Then:
 - **no** → proceed directly to Phase B; do not mention DR conditions anywhere in the report.
 - **No answer yet** (Slack only) → write this reminder as your reply and exit: *"The report analysis is ready — I just need your answer on dilution refrigerator conditions to finish. Reply with a date/time window to include them, or 'no' to skip."* The next session picks up from here: outputs and `extracted_*.md` already exist, so it must NOT re-run `run.py` or Phase A — it resolves the DR answer and continues from Phase B.
 
-If **yes** with a date only (e.g. "Feb 18 2025"), use `window_hours` (±N hours around the full calendar day):
-```python
+If **yes**, run `run_dr.py`. It reads `DR_DATA_PATH` from `.env` itself, so never read `.env`
+or name the data folder (Slack sessions are blocked from the folder):
+```bash
 cd $PROJECT_ROOT
-python -c "
-from datetime import datetime
-from lab_agent.dr import get_dr_conditions
-md = get_dr_conditions('DR_DATA_PATH_FROM_ENV', datetime(YYYY, MM, DD), window_hours=12)
-print(md if md else 'NO_DATA')
-"
+python run_dr.py "YYYY-MM-DD" --hours 12                  # a date only: the day, ±12 h
+python run_dr.py "YYYY-MM-DD HH:MM" "YYYY-MM-DD HH:MM"    # an explicit time range
 ```
-
-If **yes** with an explicit time range (e.g. "Feb 18 2025, 14:00–22:00"), use `explicit_start`/`explicit_end`:
-```python
-cd $PROJECT_ROOT
-python -c "
-from datetime import datetime
-from lab_agent.dr import get_dr_conditions
-md = get_dr_conditions(
-    'DR_DATA_PATH_FROM_ENV',
-    datetime(YYYY, MM, DD),
-    explicit_start=datetime(YYYY, MM, DD, HH, MM_start),
-    explicit_end=datetime(YYYY, MM, DD, HH, MM_end),
-)
-print(md if md else 'NO_DATA')
-"
-```
-
-Replace `DR_DATA_PATH_FROM_ENV` with `DR_DATA_PATH` from `.env`. Save the output to `outputs/<experiment_id>/dr_conditions.md`.
+It saves `dr_conditions.md` and prints its folder on the last line
+(`[dr_runner] Output folder: …`). Copy that file to `outputs/<experiment_id>/dr_conditions.md`.
+If it prints `No DR data found`, treat it as no data.
 
 ## Step 3 — multi-agent report generation
 

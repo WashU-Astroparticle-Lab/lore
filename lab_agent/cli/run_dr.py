@@ -14,11 +14,15 @@ Usage:
                                                                # summary, saves nothing
     python run_dr.py "2026-10-29 13:00" "2026-10-29 19:00" --csv RuOx12980
                                                                # one thermometer as a CSV
-                                                               # (a label, or "5" / "T5")
+                                                               # (a label, part of one if
+                                                               # only one fits, e.g. "TT",
+                                                               # or a channel, "5" / "T5")
 
 A CSV holds one row per real measurement of that thermometer, at the time it was taken,
-read from its own channel's log file. The lines printed with it say which channel and
-file it came from, how many readings it has and what was left out: put those in the reply.
+read from its own channel's log file; its name and column name the thermometer. The lines
+printed with it say which channel and file it came from, how many readings it has, what
+was left out, every channel in the log by the logger's numbering (from 0) and, for a CMN,
+how it compares with the MC's resistive thermometer: put those in the reply.
 """
 from __future__ import annotations
 
@@ -30,7 +34,7 @@ from pathlib import Path
 
 from ..config import OUTPUT_ROOT, dr_data_path
 from ..dr import get_dr_conditions
-from ..dr.live import channel_series
+from ..dr.live import BASE_MK, channel_series, cmn_comparison
 
 _FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
 
@@ -116,32 +120,86 @@ def _write_csv(data_path: str, run: dict) -> None:
         day = datetime(start.year, start.month, start.day)
         start, end = (day - timedelta(hours=run["hours"]),
                       day + timedelta(hours=24 + run["hours"]) - timedelta(seconds=1))
-    series = channel_series(Path(data_path), start, end, run["csv"])
+    root = Path(data_path)
+    series = channel_series(root, start, end, run["csv"])
+    if series["ambiguous"]:
+        print(f"[dr_csv] {run['csv']!r} fits more than one thermometer: "
+              f"{_fits(series)}. Give the full label or the channel number.")
+        sys.exit(1)
     if not series["files"]:
         print(f"[dr_csv] No log file for {run['csv']!r} between {start:%Y-%m-%d %H:%M} and "
               f"{end:%Y-%m-%d %H:%M}. Use a label from a log header (e.g. RuOx12980) or a "
               "channel number.")
         sys.exit(1)
-    labels = ", ".join(sorted(series["labels"]))
-    chans = ", ".join(f"T{n}" for n in sorted(series["channels"]))
-    safe = re.sub(r"[^A-Za-z0-9]+", "-", run["csv"]).strip("-") or "channel"
+    labels = sorted(series["labels"])
+    chans = sorted(series["channels"])
+    # The file and its column name the thermometer. They used to name only what was asked
+    # for ("4_….csv", "temperature_mK"), so a CMN223 file passed as the TT-26006 for a week.
+    name = "_".join(re.sub(r"[^A-Za-z0-9]+", "-", lab).strip("-") for lab in labels)
     out_dir = Path(OUTPUT_ROOT) / "dr_csv"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{safe}_{start:%Y%m%d-%H%M}_{end:%Y%m%d-%H%M}.csv"
+    out = out_dir / (f"ch{'-'.join(map(str, chans))}_{name}_"
+                     f"{start:%Y%m%d-%H%M}_{end:%Y%m%d-%H%M}.csv")
     with out.open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(["timestamp", "temperature_mK"])
+        w.writerow(["timestamp", f"{' / '.join(labels)} (mK)"])
         for ts, v in series["readings"]:
             w.writerow([ts.strftime("%Y-%m-%dT%H:%M:%S"), f"{v:.6g}"])
     left = ", ".join(f"{k} {r}" for r, k in sorted(series["dropped"].items())) or "nothing"
-    print(f"[dr_csv] {labels} (column {chans}) {start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M}")
+    print(f"[dr_csv] {', '.join(labels)}: channel {', '.join(map(str, chans))} "
+          f"(column {', '.join(f'T{n}' for n in chans)}), "
+          f"{start:%Y-%m-%d %H:%M} to {end:%Y-%m-%d %H:%M}")
     print(f"[dr_csv] {len(series['readings'])} readings, one per measurement, from "
           f"{', '.join(series['files'])}")
     if len(series["labels"]) > 1:
         print("[dr_csv] WARNING: the label changed between log sessions in this window; "
               "these are different sensors.")
     print(f"[dr_csv] Left out: {left}")
+    print(f"[dr_csv] Channels in this log, numbered as the logger numbers them (from 0: file "
+          f"_N.dat, column TN): {_channel_list(series['map'])}")
+    for label in labels:
+        note = _cmn_note(label, cmn_comparison(root, start, end, label, series["readings"]))
+        if note:
+            print(f"[dr_csv] NOTE: {note}")
     print(f"[dr_csv] CSV: {out}")
+
+
+def _fits(series: dict) -> str:
+    where = {lab: n for n, ch in series["map"].items() for lab in ch["labels"]}
+    return ", ".join(f"{lab} (channel {where[lab]})" if lab in where else lab
+                     for lab in series["ambiguous"])
+
+
+def _channel_list(cmap: dict) -> str:
+    def entry(n: int) -> str:
+        return f"{n} {' / '.join(sorted(cmap[n]['labels']))}"
+    measured = [entry(n) for n in sorted(cmap) if cmap[n]["measured"]]
+    idle = [entry(n) for n in sorted(cmap) if not cmap[n]["measured"]]
+    return (", ".join(measured) + " measured"
+            + (f"; {', '.join(idle)} not measured" if idle else ""))
+
+
+def _times(r: float) -> str:
+    return f"{r:.1f}x" if r < 10 else f"{r:.0f}x"
+
+
+def _cmn_note(label: str, cmp: dict | None) -> str | None:
+    """What a CMN export needs said beside it, from cmn_comparison; None for other sensors."""
+    if cmp is None:
+        return None
+    salt = f"{label} is a CMN salt thermometer, which reads correctly only near base."
+    if cmp["reference"] is None or not cmp["paired"]:
+        return f"{salt} No other MC thermometer was measured in this window to check it against."
+    ref = f"{cmp['reference']} (channel {cmp['channel']})"
+    if not cmp["off_base"]:
+        return f"{salt} {ref} stayed below {BASE_MK:.0f} mK throughout, so the fridge was near base."
+    said = (f"{salt} {ref} read above {BASE_MK:.0f} mK at {cmp['off_base']} of these "
+            f"{cmp['paired']} readings; at those times {label} read "
+            f"{_times(cmp['ratio_min'])} to {_times(cmp['ratio_max'])} what {cmp['reference']} "
+            f"did (median {_times(cmp['ratio_median'])}).")
+    if 2 / 3 <= cmp["ratio_median"] <= 1.5:
+        return said
+    return f"{said} For anything above base, use {ref}."
 
 
 def main() -> None:
