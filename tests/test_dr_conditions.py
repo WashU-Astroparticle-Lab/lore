@@ -347,7 +347,10 @@ def test_the_hour_the_clocks_go_back_is_two_hours_in_order():
     assert [datetime.fromisoformat(t) for t, _ in rows] == times, rows
     stamps = [t for t, _ in rows]
     assert "2026-11-01T01:30:00-05:00" in stamps and "2026-11-01T01:30:00-06:00" in stamps, stamps
-    assert "CDT (UTC-05:00), then CST (UTC-06:00)" in text and "01:00-01:59" in text, text
+    # The moment the clocks changed, not the first reading after it: "CST from 01:01:25"
+    # was relayed to a lab member as "the clocks changed at 01:01".
+    assert ("CDT (UTC-05:00), then CST (UTC-06:00): the clocks went back at 02:00 CDT on "
+            "2026-11-01, to 01:00 CST, so 01:00-01:59 appears twice") in text, text
 
 
 def test_the_hour_the_clocks_skip_is_not_a_gap_in_the_data():
@@ -363,7 +366,8 @@ def test_the_hour_the_clocks_skip_is_not_a_gap_in_the_data():
         md = get_dr_conditions(d, datetime(2026, 3, 8), window_hours=0)
     assert "Thermal Event Warnings" not in md, md
     assert "| TT-26006 [MC] | 46.0 mK | 47.0 mK | 48.0 mK | 48.0 mK (03-08 03:59 CDT) | 120 |" in md, md
-    assert "no reading is stamped 02:00-02:59 on 2026-03-08, and none is missing" in md, md
+    assert ("the clocks went forward at 02:00 CST on 2026-03-08, to 03:00 CDT, so no reading "
+            "is stamped 02:00-02:59, and none is missing") in md, md
 
 
 def test_a_pc_clock_on_the_wrong_time_zone_is_read_by_its_absolute_time_and_reported():

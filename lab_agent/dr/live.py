@@ -176,25 +176,45 @@ def _zone_label(t: datetime) -> str:
     return name if name.startswith("UTC") else f"{name} ({_utc(t.utcoffset())})"
 
 
+def _change_between(a: datetime, b: datetime) -> datetime:
+    """The moment between ``a`` and ``b`` that the lab's zone changes offset, on the new one."""
+    lo, hi = int(a.timestamp()), int(b.timestamp())
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if lab_time(datetime.fromtimestamp(mid, timezone.utc)).utcoffset() == a.utcoffset():
+            lo = mid
+        else:
+            hi = mid
+    return lab_time(datetime.fromtimestamp(hi, timezone.utc))
+
+
 def describe_times(times: list[datetime]) -> str:
     """How to read a series' clock times: the zone they are in, and any change of clocks
-    inside the series. ``times`` must be sorted."""
+    inside the series. ``times`` must be sorted.
+
+    The change is given as the moment the clocks changed (02:00 CDT, to 01:00 CST), not as
+    the first reading after it: "CST from 01:01:25" was relayed as "the clocks changed at
+    01:01"."""
     if not times:
         return ""
     parts = [_zone_label(times[0])]
+    minute = timedelta(minutes=1)
     for a, b in zip(times, times[1:]):
         step = b.utcoffset() - a.utcoffset()
         if not step:
             continue
-        wall = b.replace(tzinfo=None)
+        new = _change_between(a, b)
+        old = new.astimezone(a.tzinfo)
+        first = f"first reading after it: {b:%H:%M:%S} {b.tzname()}"
         if step < timedelta(0):
-            what = (f"the clocks went back, so {wall:%H}:00-{wall:%H}:59 on {wall:%Y-%m-%d} "
-                    "appears twice; the UTC offset on each time tells the two apart")
+            what = (f"the clocks went back at {old:%H:%M} {a.tzname()} on {old:%Y-%m-%d}, to "
+                    f"{new:%H:%M} {b.tzname()}, so {new:%H:%M}-{old - minute:%H:%M} appears "
+                    f"twice; the UTC offset on each time tells the two apart ({first})")
         else:
-            gone = wall - step
-            what = (f"the clocks went forward, so no reading is stamped {gone:%H}:00-"
-                    f"{gone:%H}:59 on {wall:%Y-%m-%d}, and none is missing")
-        parts.append(f"then {_zone_label(b)} from {wall:%Y-%m-%d %H:%M:%S} ({what})")
+            what = (f"the clocks went forward at {old:%H:%M} {a.tzname()} on {old:%Y-%m-%d}, "
+                    f"to {new:%H:%M} {b.tzname()}, so no reading is stamped "
+                    f"{old:%H:%M}-{new - minute:%H:%M}, and none is missing ({first})")
+        parts.append(f"then {_zone_label(b)}: {what}")
     return "the fridge PC's local time, " + ", ".join(parts) + "."
 
 

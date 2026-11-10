@@ -192,6 +192,12 @@ the thermometer label and channel, the window, how many readings, and what was l
 add a validity range or flag of your own. A `NOTE:` line it prints goes in your reply word for
 word: for a CMN it says how the CMN compares with the MC's resistive thermometer.
 
+**When you upload the CSVs, all of that goes in the upload's `--comment-file`.** Your reply
+file is dropped when it repeats a message you already posted. On 2026-11-09 the comment named
+the thermometers and the clock change, the reply also had the reading counts, and the counts
+never reached the thread. Put everything in the comment and make the reply file
+`(no reply)`. If you have nothing to upload, put it all in the reply.
+
 **Channel numbers are the logger's, counted from 0** (file `_N.dat`, column `TN`), and
 `--csv` prints the whole list. People count differently. A lab member asked for "channel 4"
 and meant TT-26006, which is channel 3; they got the CMN223 on channel 4 and plotted it heated to
