@@ -366,23 +366,23 @@ def test_the_hour_the_clocks_skip_is_not_a_gap_in_the_data():
     assert "no reading is stamped 02:00-02:59 on 2026-03-08, and none is missing" in md, md
 
 
-def test_a_pc_clock_out_of_step_with_the_time_zone_is_reported():
-    # A PC left on summer time in January logs its wall clock an hour ahead of the zone.
-    utc0 = datetime(2026, 1, 15, 18, 0, tzinfo=timezone.utc)  # 12:00 CST
-    rows = [logged_row(utc0 + timedelta(minutes=i), clock_offset=timedelta(hours=-5))
-            for i in range(10)]
+def test_a_pc_clock_on_the_wrong_time_zone_is_read_by_its_absolute_time_and_reported():
+    # Until 2025-04-25 the fridge PC was set to Dutch time: Date1 ran 7 h ahead of the lab
+    # while Date2 stayed true. Read by Date1, a 13:00-14:00 window returned 06:00-07:00.
+    utc0 = datetime(2025, 2, 18, 19, 0, tzinfo=timezone.utc)  # 13:00 CST, 20:00 CET
+    rows = [logged_row(utc0 + timedelta(minutes=i), tt=f"{40 + i}.0E+0",
+                       clock_offset=timedelta(hours=1)) for i in range(60)]
     with lab_zone(), tempfile.TemporaryDirectory() as tmp:
         d = Path(tmp)
-        write(d, "LogLCR___2026-01-10-00-00-00_3.dat", rows)
-        text, csv_file = _export(d, datetime(2026, 1, 15, 11), datetime(2026, 1, 15, 14), "TT")
-        md = get_dr_conditions(d, datetime(2026, 1, 15), window_hours=0)
-        first = csv_file.read_text(encoding="utf-8").splitlines()[1]
-    warning = ("10 of 10 readings were logged with the PC's clock at UTC-05:00, where the "
-               "lab's time zone gives UTC-06:00")
-    assert f"WARNING: {warning}" in text, text
-    assert f"**Clock warning:** {warning}" in md, md
-    # The reading keeps the offset it was logged under: the right instant, 18:00 UTC.
-    assert first.startswith("2026-01-15T13:00:00-05:00,"), first
+        write(d, "LogLCR___2025-02-17-17-02-38_3.dat", rows)
+        text, csv_file = _export(d, datetime(2025, 2, 18, 13), datetime(2025, 2, 18, 13, 59), "TT")
+        md = get_dr_conditions(d, datetime(2025, 2, 18), window_hours=0)
+        got = [r.split(",") for r in csv_file.read_text(encoding="utf-8").splitlines()[1:]]
+    assert len(got) == 60 and got[0] == ["2025-02-18T13:00:00-06:00", "40"], got[:2]
+    warning = ("60 of 60 readings were logged with the PC's clock set to UTC+01:00, not the "
+               "lab's UTC-06:00 (from 2025-02-18 13:00 CST)")
+    assert f"WARNING: {warning}" in text and "differ by 7 h" in text, text
+    assert "**Clock warning:** 60 of" in md, md
 
 
 def test_the_channel_comes_from_the_file_name():

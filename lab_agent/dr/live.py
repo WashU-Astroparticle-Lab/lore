@@ -26,9 +26,12 @@ This module takes neither shortcut:
   wall clock, Date2 the absolute time. Date1 alone is wrong twice a year: on 2026-11-01
   it ran from 01:00 to 01:59 twice (CDT, then CST), and on 2026-03-08 it jumped from 01:59
   to 03:00, which read as an hour with no data. Every time returned here is the wall-clock
-  time with the UTC offset it was logged under, taken from Date2, so the repeated hour
-  sorts in order and the skipped one is no gap. A row whose two times disagree with the
-  lab's time zone is counted (``clock``), so a PC clock set wrong is reported, not hidden.
+  time in the lab's zone with its UTC offset, taken from Date2, so the repeated hour
+  sorts in order and the skipped one is no gap. Date2 is also right where Date1 is not:
+  until 2025-04-25 the PC was set to Dutch time (UTC+1/+2), so Date1 ran 7 h ahead of the
+  lab, while Date2 stayed true (that day the logger stopped at 16:13 UTC, Date1 18:13, and
+  restarted at 17:02 UTC, Date1 12:02). Such rows are converted from Date2 and counted
+  (``clock``), so a PC clock set to the wrong zone is reported, not hidden.
 
 Values are returned as logged, in mK. Standard library only, and read-only: nothing
 here writes a file.
@@ -130,20 +133,19 @@ def _logged_offset(wall: datetime, date2: str | None) -> timedelta | None:
 
 
 def _row_time(wall: datetime, date2: str | None) -> tuple[datetime, timedelta | None]:
-    """(the row's time, the offset the lab's zone gives for it when the log's differs)."""
+    """(the row's time in the lab's zone, the offset the PC logged it under when that is
+    not the lab's). The instant is Date2's; Date1 only says which offset was in force."""
     offset = _logged_offset(wall, date2)
     if offset is None:
         return lab_time(wall), None  # no absolute time to go by: the wall clock
-    ts = wall.replace(tzinfo=_fixed(offset))
-    local = lab_time(ts)
-    if local.utcoffset() == offset:
-        return local, None  # the same instant, with the zone's name for it ("CDT")
-    return ts, local.utcoffset()
+    local = lab_time(wall.replace(tzinfo=_fixed(offset)))
+    return local, (None if local.utcoffset() == offset else offset)
 
 
 def new_clock() -> dict:
     """A tally for ``read_lcr_file(clock=...)``: rows read, and rows whose wall-clock time
-    (Date1) is not what the lab's time zone makes of their absolute time (Date2)."""
+    (Date1) is not what the lab's time zone makes of their absolute time (Date2): the
+    offsets the PC logged under ("logged") and the lab's for the same times ("expected")."""
     return {"rows": 0, "mismatched": 0, "first": None, "logged": set(), "expected": set()}
 
 
@@ -159,12 +161,14 @@ def clock_note(clock: dict | None) -> str | None:
         return None
     logged = " / ".join(_utc(o) for o in sorted(clock["logged"]))
     expected = " / ".join(_utc(o) for o in sorted(clock["expected"]))
+    gaps = sorted({abs(a - b).total_seconds() / 3600 for a in clock["logged"]
+                   for b in clock["expected"]})
+    by = " or ".join(f"{h:g} h" for h in gaps) if len(gaps) <= 2 else f"{gaps[0]:g}-{gaps[-1]:g} h"
     return (f"{clock['mismatched']} of {clock['rows']} readings were logged with the PC's "
-            f"clock at {logged}, where the lab's time zone gives {expected} (first at "
-            f"{clock['first']:%Y-%m-%d %H:%M}). The PC's clock or time-zone setting was "
-            "off. Those readings keep the offset they were logged under, so their order "
-            "and spacing are right, but their clock time may be off by the difference. "
-            "Check the PC's date and time settings.")
+            f"clock set to {logged}, not the lab's {expected} (from "
+            f"{clock['first']:%Y-%m-%d %H:%M %Z}). Their times here are the log's absolute "
+            f"time in the lab's zone, so they differ by {by} from the clock time written in "
+            "the log file itself. If someone compares with the raw file, tell them.")
 
 
 def _zone_label(t: datetime) -> str:
@@ -318,17 +322,17 @@ def read_lcr_file(path: Path, start: datetime, end: datetime, channel: int | Non
             continue  # calibration-name row, or a partial line being written
         if wall < lo or wall > hi:
             continue
-        ts, expected = _row_time(wall, parts[date2] if date2 is not None and date2 < len(parts)
-                                 else None)
+        ts, logged = _row_time(wall, parts[date2] if date2 is not None and date2 < len(parts)
+                               else None)
         if ts < start or ts > end:
             continue
         if clock is not None:
             clock["rows"] += 1
-            if expected is not None:
+            if logged is not None:
                 clock["mismatched"] += 1
                 clock["first"] = min(clock["first"] or ts, ts)
-                clock["logged"].add(ts.utcoffset())
-                clock["expected"].add(expected)
+                clock["logged"].add(logged)
+                clock["expected"].add(ts.utcoffset())
         for i, label, r, platinum in channels:
             if i >= len(parts):
                 continue
