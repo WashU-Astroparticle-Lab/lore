@@ -14,6 +14,8 @@ Read the extracted files and `connections.md` in `<out_dir>`, plus `<out_dir>/me
 
 **If the spawning prompt carries a stated objective from the user, that is the experiment's objective** — it outranks anything you infer from the notebook code. Code shows what was run, not what it was for.
 
+**A result from a lab package comes with its documented caveats.** When you quote a rate, count, efficiency or fidelity that a lab package's analysis produced, read that package's **Documented caveats** in `extracted_deps.md`. Say what those checks showed in the notebooks, or that the notebooks did not report them. A parity-flip rate quoted without whether its reconstruction was flagged untrustworthy reads as more settled than it is. The critic fails it (its item 11).
+
 Embed figures with relative paths (e.g. `![caption](labarchives_images/filename.png)`) reading figure descriptions only from the extracted files.
 
 Write the finished report to `<out_dir>/[UNSIGNED] <experiment_id>.md`. Output must start directly with the `# [UNSIGNED] <experiment_id>` title line — no preamble, no filename, no `.md` extension in the title.

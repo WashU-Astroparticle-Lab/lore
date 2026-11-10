@@ -42,6 +42,15 @@ Read the `[UNSIGNED]` report, all `extracted_*.md`, and `connections.md` in `<ou
     - every claim carries **at least as much hedging as the report**. If the report says "consistent with", the summary saying "confirms"/"confirmed" is a FAIL. This applies even when the report earned that hedge through a revision.
     - no claim appears that is absent from the report.
     Quote the offending summary line and the report line it contradicts.
+11. **A reconstructed rate is not presented as checked when its checks are unknown.** If
+    the report quotes a parity-flip, tunnelling or burst rate or count, a reconstruction
+    efficiency or a fidelity, and it came from a lab package's reconstruction (directly, or
+    through a measurement class that calls one), look at that package's **Documented
+    caveats** in `extracted_deps.md`. The report must either say what those checks showed,
+    as the notebooks printed them (`extracted_github.md`), or say plainly that they were not
+    reported. A rate stated as a measured result with neither is a FAIL. Quote the sentence
+    and name the caveat it skips. If `extracted_deps.md` documents no caveats for that
+    package, this item passes.
 
 ## Checklist (DR-only reports — when the spawning prompt says so)
 

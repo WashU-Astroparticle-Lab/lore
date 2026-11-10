@@ -167,6 +167,44 @@ def _collect_imports_from_notebooks(bundle_artifacts) -> dict[str, list[ImportIn
     return all_imports
 
 
+# A wanted definition longer than this is shown as an outline. Following re-exports
+# reaches the real classes, and daq's TimeStream alone is several hundred lines.
+_MAX_DEF_LINES = 250
+
+
+def _render_def(source: str, node) -> str | None:
+    """A definition's source; for a long class, its header, docstring, ``__init__`` (the
+    constructor defaults) and one line per other method; a long function, cut short."""
+    seg = ast.get_source_segment(source, node)
+    if not seg:
+        return None
+    lines = seg.splitlines()
+    if len(lines) <= _MAX_DEF_LINES:
+        return seg
+    if not isinstance(node, ast.ClassDef):
+        return "\n".join(lines[:_MAX_DEF_LINES] + [
+            f"    # ... ({len(lines) - _MAX_DEF_LINES} more lines)"])
+    out = [lines[0]]
+    doc = ast.get_docstring(node)
+    if doc:
+        out.append('    """' + doc.strip() + '"""')
+    methods = []
+    for item in node.body:
+        if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if item.name == "__init__":
+            # get_source_segment drops the first line's indent; put it back.
+            init = (ast.get_source_segment(source, item) or "").splitlines()
+            out += ["", *(["    " + init[0]] + init[1:] if init else [])]
+        else:
+            first = (ast.get_docstring(item) or "").strip().splitlines()
+            methods.append(f"    def {item.name}(...)" + (f"  # {first[0]}" if first else ""))
+    if methods:
+        out += ["", f"    # Other methods (an outline: the class is {len(lines)} lines):",
+                *methods]
+    return "\n".join(out)
+
+
 def _render_symbols(source: str, wanted: set[str]) -> str | None:
     """Symbol-targeted rendering of a dependency source file, or None if unparseable.
 
@@ -195,7 +233,7 @@ def _render_symbols(source: str, wanted: set[str]) -> str | None:
                     consts.append(seg)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             if node.name in wanted:
-                seg = ast.get_source_segment(source, node)
+                seg = _render_def(source, node)
                 if seg:
                     wanted_defs.append((node.name, seg))
             else:
@@ -215,11 +253,10 @@ def _render_symbols(source: str, wanted: set[str]) -> str | None:
 # ---------------------------------------------------------------------------
 
 def _gh_get(url: str, token: str) -> dict | list | None:
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "lab-agent/1.0",
-    })
+    headers = {"Accept": "application/vnd.github.v3+json", "User-Agent": "lab-agent/1.0"}
+    if token:  # public repositories need none; an empty one is refused as bad credentials
+        headers["Authorization"] = f"token {token}"
+    req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             return json.loads(r.read())
@@ -291,6 +328,87 @@ def _list_org_repos_cached(owner: str, token: str) -> tuple[dict[str, str], bool
     return repos, False
 
 
+# Files fetched per package while following re-exports (each costs an API call).
+_MAX_FOLLOW_FILES = 12
+
+
+def _import_target(key: str, package: str, node: ast.ImportFrom) -> str | None:
+    """The module an import in file ``key`` (a path from the package root) points at, as a
+    path from the package root without extension; None if it is outside the package."""
+    here = key.rsplit("/", 1)[0] if "/" in key else ""
+    if node.level:
+        parts = here.split("/") if here else []
+        if node.level - 1 > len(parts):
+            return None
+        base = parts[:len(parts) - (node.level - 1)]
+        mod = node.module.split(".") if node.module else []
+        return "/".join(base + mod)
+    mod = (node.module or "").split(".")
+    if mod[0] != package:
+        return None
+    return "/".join(mod[1:])
+
+
+def _module_files(target: str) -> list[str]:
+    return ["__init__.py"] if not target else [f"{target}.py", f"{target}/__init__.py"]
+
+
+def _follow_reexports(files: dict[str, str], package: str, wanted: set[str], fetch,
+                      budget: int = _MAX_FOLLOW_FILES) -> dict[str, str]:
+    """Fetch the modules that define ``wanted``, following the imports that re-export them.
+
+    ``from daq import TimeStream`` names no submodule, so only ``daq/__init__.py`` was
+    fetched: a list of re-exports that says nothing about what TimeStream does. This
+    follows ``from .measurements import TimeStream`` (relative), ``from
+    qpd.reconstruction.hmm import ...`` (absolute, inside the package) and, when a file
+    names a missing symbol as a string (a lazy ``__getattr__`` export), the imports made
+    inside its functions. ``fetch(path)`` returns a file's text or None; ``wanted`` gains
+    the original name of a symbol imported ``as`` another. Returns ``files``, extended.
+    """
+    queue = list(files)
+    while queue and budget > 0:
+        key = queue.pop(0)
+        try:
+            tree = ast.parse(files[key])
+        except SyntaxError:
+            continue
+        top = {id(n) for n in tree.body}
+        defined = {n.name for n in tree.body
+                   if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+        missing = wanted - defined
+        strings = {n.value for n in ast.walk(tree)
+                   if isinstance(n, ast.Constant) and isinstance(n.value, str)}
+        # Named in a string but not imported at the top: a lazy export. A symbol that is
+        # imported at the top is in ``__all__`` too, and is not one.
+        imported = {a.asname or a.name for n in tree.body if isinstance(n, ast.ImportFrom)
+                    for a in n.names}
+        lazy = bool((missing - imported) & strings)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ImportFrom) or budget <= 0:
+                continue
+            target = _import_target(key, package, node)
+            if target is None:
+                continue
+            for alias in node.names:
+                if (alias.asname or alias.name) in missing:
+                    wanted.add(alias.name)
+                    paths = _module_files(target)
+                elif lazy and id(node) not in top:
+                    paths = _module_files(f"{target}/{alias.name}" if target else alias.name)
+                else:
+                    continue
+                if any(path in files for path in paths):
+                    continue
+                for path in paths:
+                    budget -= 1
+                    text = fetch(path)
+                    if text:
+                        files[path] = text
+                        queue.append(path)
+                        break
+    return files
+
+
 def _fetch_package_source(
     owner: str,
     repo: str,
@@ -298,8 +416,10 @@ def _fetch_package_source(
     package: str,
     submodules: list[str],
     token: str,
+    symbols: set[str] | None = None,
 ) -> dict[str, str]:
-    """Fetch __init__.py and any directly-imported submodule files."""
+    """Fetch __init__.py, any directly-imported submodule files, and the modules that
+    define ``symbols`` (see ``_follow_reexports``)."""
     base = f"https://api.github.com/repos/{owner}/{repo}/contents"
     fetched: dict[str, str] = {}
 
@@ -320,6 +440,11 @@ def _fetch_package_source(
                     if sub_content:
                         fetched[f"{sub_path}{ext}"] = sub_content
                         break
+            if symbols:
+                def fetch(path: str, root: str = pkg_root) -> str | None:
+                    return _gh_file(f"{base}/{root}/{path}", token)
+
+                _follow_reexports(fetched, package, symbols, fetch)
             break
 
     # If no package dir found, try a single-file module
@@ -389,12 +514,18 @@ def build_dependencies_md(bundle_artifacts, owner: str) -> str | None:
             ))
             plans[package] = (repo_name, org_repos[repo_name.lower()], submodules)
 
+    # The names each package's notebooks import; following re-exports adds the original
+    # name of anything imported under another.
+    wanted_by_pkg = {package: {name for imp in imports[package] for name in imp.names if name}
+                     for package in plans}
+
     sources: dict[str, dict[str, str]] = {}
     if plans:
         def _fetch_one(package: str) -> dict[str, str]:
             repo_name, branch, submodules = plans[package]
             print(f"[deps] Fetching source for `{package}` from {owner}/{repo_name}…")
-            return _fetch_package_source(owner, repo_name, branch, package, submodules, token)
+            return _fetch_package_source(owner, repo_name, branch, package, submodules, token,
+                                         wanted_by_pkg[package])
 
         with ThreadPoolExecutor(max_workers=min(8, len(plans))) as pool:
             sources = dict(zip(plans, pool.map(_fetch_one, plans)))
@@ -441,12 +572,13 @@ def build_dependencies_md(bundle_artifacts, owner: str) -> str | None:
             lines.append("")
 
         source_files = sources.get(package) or {}
+        lines += _documentation(owner, repo_name, imported_names, token)
         if not source_files:
             lines.append("_Source files could not be retrieved._")
             lines.append("")
             continue
 
-        wanted = set(imported_names)
+        wanted = wanted_by_pkg.get(package, set(imported_names))
         for filename, content in source_files.items():
             lines.append(f"### `{filename}`")
             lines.append("")
@@ -465,6 +597,51 @@ def build_dependencies_md(bundle_artifacts, owner: str) -> str | None:
             lines.append("")
 
     return "\n".join(lines)
+
+
+# Characters of documentation attached per package: two sections per symbol, a few
+# symbols. More would bury the source the analyst also has to read.
+_DOC_CHARS_PER_PACKAGE = 16_000
+
+
+def _documentation(owner: str, repo: str, symbols: list[str], token: str) -> list[str]:
+    """Markdown lines quoting the repository's own docs about the imported symbols.
+
+    The source says what a class takes; its docs say what its result means and when not to
+    trust it. qpd's reconstruction documents that ``degenerate`` must be checked before a
+    flip rate is used, and that is in no signature. Returns [] when the repository has no
+    docs or they cannot be read.
+    """
+    from .. import repo_docs
+
+    try:
+        texts, commit = repo_docs.doc_texts(owner, repo, token)
+    except Exception as exc:  # noqa: BLE001 — docs are extra context; the source still goes
+        print(f"[deps] No docs for {owner}/{repo}: {type(exc).__name__}: {exc}")
+        return []
+    if not texts:
+        return []
+    out = [f"### Documentation (the repository's own docs, commit `{commit}`)", ""]
+    intro = repo_docs.readme_intro(texts)
+    if intro:
+        out += ["**What its README says it is:**", "", intro, ""]
+    used, skipped = len(intro), []
+    for name in symbols:
+        found = repo_docs.sections_about(texts, name)
+        size = sum(len(body) for _, _, body in found)
+        if not found:
+            continue
+        if used + size > _DOC_CHARS_PER_PACKAGE:
+            skipped.append(f"`{name}` ({', '.join(path for path, _, _ in found)})")
+            continue
+        used += size
+        for path, title, body in found:
+            # The quoted section's own headings sit below this one, not beside the packages.
+            out += [f"#### `{name}`: {path}, section \"{title}\"", "",
+                    repo_docs.demote_headings(body, 5), ""]
+    if skipped:
+        out += ["_Also documented, not quoted here for length: " + "; ".join(skipped) + "._", ""]
+    return out if len(out) > 2 else []
 
 
 def resolve_dependencies(
