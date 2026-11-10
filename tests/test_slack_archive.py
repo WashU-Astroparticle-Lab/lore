@@ -316,6 +316,20 @@ def test_placeholder_names_never_reach_the_page():
     assert "Member" not in title + body, (title, body)
 
 
+def test_none_is_not_left_beside_real_ids():
+    # The shape one backfilled summary had.
+    for raw, want in {
+        "**IDs**: 6.9 GHz device (measured at SLAC and local lab); none":
+            "**IDs**: 6.9 GHz device (measured at SLAC and local lab)",
+        "**IDs**: none, JKID-3": "**IDs**: JKID-3",
+        "**IDs:** BE260213, run 2, none.": "**IDs:** BE260213, run 2",
+        "**IDs**: none": "**IDs**: none",
+        "**IDs**: Nonelinear resonator, R7": "**IDs**: Nonelinear resonator, R7",
+    }.items():
+        _, body = A.parse_summary(f"TITLE: T\n**What was discussed**\n- x\n{raw}")
+        assert body.splitlines()[-1] == want, (raw, body)
+
+
 def test_a_discussion_stops_at_the_next_ones_figure():
     recs = [{"ts": f"{T0 + m * 60:.6f}", "user": "U1", "text": t, "reactions": [], "bot": False,
              "files": [{"id": f"F{m}", "name": "p.png", "mimetype": "image/png"}] if img else []}

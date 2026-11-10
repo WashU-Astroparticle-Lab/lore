@@ -386,7 +386,8 @@ TITLE: <at most 10 words naming the topic>
 - conclusions, decisions and next steps; say who by first name where it matters
 **Open questions**
 - only if something was left open; otherwise leave this section out
-**IDs**: device, chip, run, sample and instrument names mentioned, comma separated, or "none"
+**IDs**: device, chip, run, sample and instrument names mentioned, comma separated; write
+"none" only when there are none
 
 Rules:
 - Never quote a message. Paraphrase.
@@ -501,9 +502,22 @@ def unlabel(text: str) -> str:
                   flags=re.M)
 
 
+_IDS_LINE = re.compile(r"^(\*\*IDs(?:\*\*:|:\*\*))[ \t]*(.*)$", re.M)
+
+
+def _tidy_ids(text: str) -> str:
+    """The IDs line without a "none" beside real IDs. The summariser once ended one with
+    "6.9 GHz device (measured at SLAC and local lab); none" (1 of 98 at the backfill)."""
+    def fix(m: re.Match) -> str:
+        ids = re.sub(r"\s*[;,]\s*none\.?\s*$", "", m.group(2), flags=re.I)
+        ids = re.sub(r"^none\s*[;,]\s*", "", ids, flags=re.I)
+        return f"{m.group(1)} {ids}"
+    return _IDS_LINE.sub(fix, text)
+
+
 def parse_summary(text: str) -> tuple[str, str]:
     """(title, markdown body) from the summariser's reply, placeholders removed."""
-    lines = unlabel(text).strip().splitlines()
+    lines = _tidy_ids(unlabel(text)).strip().splitlines()
     if lines and lines[0].upper().startswith("TITLE:"):
         return lines[0].split(":", 1)[1].strip().strip("*").strip() or "Discussion", \
             "\n".join(lines[1:]).strip()
