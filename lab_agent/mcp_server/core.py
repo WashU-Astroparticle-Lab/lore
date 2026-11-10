@@ -28,7 +28,7 @@ import os
 import re
 import sys
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..cli import ask
@@ -295,7 +295,7 @@ def ask_graph(question: str) -> dict:
 @_quiet
 def dr_status(hours: float = 2.0, now: datetime | None = None) -> dict:
     """The dilution refrigerator's thermometry over the last ``hours``, from its own logs."""
-    from ..dr.live import recent_thermometry
+    from ..dr.live import lab_time, recent_thermometry
 
     try:
         hours = max(0.1, min(float(hours), DR_MAX_HOURS))
@@ -307,7 +307,8 @@ def dr_status(hours: float = 2.0, now: datetime | None = None) -> dict:
                 "note": "DR_DATA_PATH is not set on LORE's machine, so the fridge logs "
                         "cannot be found. Carry on without them."}
 
-    end = now or datetime.now()
+    # Aware, so the window is real hours even across a change of clocks.
+    end = lab_time(now or datetime.now(timezone.utc))
     result = recent_thermometry(data_path, end - timedelta(hours=hours), end)
     if "reason" in result:
         return {"available": False, "note": result["reason"]}
@@ -324,12 +325,15 @@ def dr_status(hours: float = 2.0, now: datetime | None = None) -> dict:
             warnings.append(f"The newest reading is {age_min:.0f} min old; the log "
                             "normally updates every few seconds, so logging may have "
                             "stopped. Treat these values as stale.")
+    window_start = datetime.fromisoformat(result["window_start"])
     stale_other = [name for name, when in result["other_logs_last_written"].items()
-                   if when is None or when < result["window_start"]]
+                   if when is None or datetime.fromisoformat(when) < window_start]
     if stale_other:
         warnings.append("No pressure, flow or pulse-tube data: those logs ("
                         + ", ".join(stale_other) + ") have not been written during this "
                         "window. Only thermometry is available.")
+    if result.get("clock_problem"):
+        warnings.append(result["clock_problem"])
 
     return {
         "available": result["found"],

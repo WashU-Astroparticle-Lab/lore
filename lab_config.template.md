@@ -9,6 +9,7 @@ The pipeline agent reads `lab_config.md` at startup — do not commit it.
 |-----|-------|
 | PROJECT_ROOT | /path/to/your/LORE/checkout |
 | PYTHON | <absolute path to the interpreter that has the project's dependencies, e.g. C:/Users/you/miniconda3/python.exe> |
+| Time zone | <the zone the fridge PC's clock is set to, as an IANA name, e.g. America/New_York; empty: this computer's own zone. The DR reader checks each log row's wall-clock time against it> |
 
 ## Required .env keys
 

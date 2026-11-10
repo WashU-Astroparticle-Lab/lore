@@ -19,22 +19,25 @@ Usage:
                                                                # or a channel, "5" / "T5")
 
 A CSV holds one row per real measurement of that thermometer, at the time it was taken,
-read from its own channel's log file; its name and column name the thermometer. The lines
-printed with it say which channel and file it came from, how many readings it has, what
-was left out, every channel in the log by the logger's numbering (from 0) and, for a CMN,
-how it compares with the MC's resistive thermometer: put those in the reply.
+read from its own channel's log file; its name and column name the thermometer. Each time
+is the fridge PC's local time with its UTC offset (2026-11-01T01:30:05-06:00), so the hour
+repeated when the clocks go back is two distinct hours. The lines printed with it say
+which channel and file it came from, how many readings it has, what was left out, how to
+read the times, every channel in the log by the logger's numbering (from 0) and, for a
+CMN, how it compares with the MC's resistive thermometer: put those in the reply.
 """
 from __future__ import annotations
 
 import csv
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from ..config import OUTPUT_ROOT, dr_data_path
 from ..dr import get_dr_conditions
-from ..dr.live import BASE_MK, channel_series, cmn_comparison
+from ..dr.live import (BASE_MK, channel_series, clock_note, cmn_comparison, describe_times,
+                       lab_time)
 
 _FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
 
@@ -74,7 +77,8 @@ def parse_args(argv: list[str] | None = None, now: datetime | None = None) -> di
     hours = int(hours) if hours.is_integer() else hours
 
     if last_raw is not None:
-        end = now or datetime.now()
+        # Aware: a naive "now" in the hour the clocks go back would be read as the first one.
+        end = now or lab_time(datetime.now(timezone.utc))
         n = float(last_raw)
         return {"mode": "last", "start": end - timedelta(hours=n), "end": end, "hours": n,
                 "csv": csv_label, "window_desc": f"last {n:g} h"}
@@ -144,7 +148,7 @@ def _write_csv(data_path: str, run: dict) -> None:
         w = csv.writer(fh)
         w.writerow(["timestamp", f"{' / '.join(labels)} (mK)"])
         for ts, v in series["readings"]:
-            w.writerow([ts.strftime("%Y-%m-%dT%H:%M:%S"), f"{v:.6g}"])
+            w.writerow([ts.isoformat(timespec="seconds"), f"{v:.6g}"])
     left = ", ".join(f"{k} {r}" for r, k in sorted(series["dropped"].items())) or "nothing"
     print(f"[dr_csv] {', '.join(labels)}: channel {', '.join(map(str, chans))} "
           f"(column {', '.join(f'T{n}' for n in chans)}), "
@@ -155,6 +159,11 @@ def _write_csv(data_path: str, run: dict) -> None:
         print("[dr_csv] WARNING: the label changed between log sessions in this window; "
               "these are different sensors.")
     print(f"[dr_csv] Left out: {left}")
+    if series["readings"]:
+        print(f"[dr_csv] Times: {describe_times([t for t, _ in series['readings']])} Each "
+              "timestamp ends in its UTC offset.")
+    if clock_note(series["clock"]):
+        print(f"[dr_csv] WARNING: {clock_note(series['clock'])}")
     print(f"[dr_csv] Channels in this log, numbered as the logger numbers them (from 0: file "
           f"_N.dat, column TN): {_channel_list(series['map'])}")
     for label in labels:

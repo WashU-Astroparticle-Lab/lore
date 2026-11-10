@@ -22,6 +22,13 @@ This module takes neither shortcut:
   an afternoon that had 1,251 RuOx measurements. A thermometer with no file of its own in
   the window was not being scanned, and is listed with no readings rather than with
   copies of an old one.
+* **Times are real elapsed time.** Each row carries its time twice: Date1 is the PC's
+  wall clock, Date2 the absolute time. Date1 alone is wrong twice a year: on 2026-11-01
+  it ran from 01:00 to 01:59 twice (CDT, then CST), and on 2026-03-08 it jumped from 01:59
+  to 03:00, which read as an hour with no data. Every time returned here is the wall-clock
+  time with the UTC offset it was logged under, taken from Date2, so the repeated hour
+  sorts in order and the skipped one is no gap. A row whose two times disagree with the
+  lab's time zone is counted (``clock``), so a PC clock set wrong is reported, not hidden.
 
 Values are returned as logged, in mK. Standard library only, and read-only: nothing
 here writes a file.
@@ -29,9 +36,11 @@ here writes a file.
 from __future__ import annotations
 
 import bisect
+import functools
 import math
+import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 LCR_GLOB = "LogLCR___*.dat"
@@ -43,6 +52,146 @@ _SESSION_TS = re.compile(r"(\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2})")
 _FILE_CHANNEL = re.compile(r"_(\d)\.dat$", re.IGNORECASE)
 _ROW_TS_FORMAT = "%Y-%m-%d %H:%M:%S"
 _ROW_TS = re.compile(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\t")
+# Date2 is LabVIEW's clock: seconds since 1904-01-01 00:00 UTC.
+_LABVIEW_EPOCH = datetime(1904, 1, 1, tzinfo=timezone.utc)
+
+
+# ── time ──────────────────────────────────────────────────────────────────────
+
+@functools.lru_cache(maxsize=None)
+def _zone_named(name: str):
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        return None
+
+
+@functools.lru_cache(maxsize=1)
+def _configured_zone_name() -> str:
+    try:
+        from ..config import lab_config_value
+    except ImportError:
+        return ""
+    return lab_config_value("Time zone")
+
+
+def lab_zone():
+    """The fridge PC's time zone: LAB_TIMEZONE, else lab_config.md's "Time zone" (an IANA
+    name such as America/Chicago), else None, meaning this computer's own zone. A name that
+    does not load also gives None; on Windows the zone data is the tzdata package."""
+    name = os.environ.get("LAB_TIMEZONE") or _configured_zone_name()
+    return _zone_named(name) if name else None
+
+
+_FIXED: dict = {}
+
+
+def _fixed(offset: timedelta, name: str | None = None) -> timezone:
+    if name and " " in name:  # Windows names its zones in full: "Central Daylight Time"
+        name = "".join(w[0] for w in name.split())
+    key = (offset, name)
+    if key not in _FIXED:
+        _FIXED[key] = timezone(offset, name) if name else timezone(offset)
+    return _FIXED[key]
+
+
+def lab_time(dt: datetime) -> datetime:
+    """``dt`` on the fridge PC's clock, with the UTC offset in force then fixed on it.
+
+    A naive ``dt`` is read as that clock's wall time; in the hour the clocks go back it is
+    the first of the two. The offset is fixed (``timezone(-6 h, "CST")``) rather than a
+    zone because Python compares two times in the *same* zone by wall time, which sorts
+    01:30 CST before 01:45 CDT although it came 45 minutes after it.
+    """
+    zone = lab_zone()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=zone) if zone else dt.astimezone()
+    else:
+        dt = dt.astimezone(zone) if zone else dt.astimezone()
+    return dt.replace(tzinfo=_fixed(dt.utcoffset(), dt.tzname()))
+
+
+def _logged_offset(wall: datetime, date2: str | None) -> timedelta | None:
+    """The UTC offset a row was logged under, Date1 minus Date2; None when Date2 is not a
+    usable absolute time (it must agree with Date1 to a whole quarter hour, within 14 h)."""
+    if not date2:
+        return None
+    try:
+        utc = _LABVIEW_EPOCH + timedelta(seconds=float(date2))
+    except (ValueError, OverflowError):
+        return None
+    diff = (wall - utc.replace(tzinfo=None)).total_seconds()
+    quarter = round(diff / 900) * 900
+    if abs(diff - quarter) > 5 or abs(quarter) > 14 * 3600:
+        return None
+    return timedelta(seconds=quarter)
+
+
+def _row_time(wall: datetime, date2: str | None) -> tuple[datetime, timedelta | None]:
+    """(the row's time, the offset the lab's zone gives for it when the log's differs)."""
+    offset = _logged_offset(wall, date2)
+    if offset is None:
+        return lab_time(wall), None  # no absolute time to go by: the wall clock
+    ts = wall.replace(tzinfo=_fixed(offset))
+    local = lab_time(ts)
+    if local.utcoffset() == offset:
+        return local, None  # the same instant, with the zone's name for it ("CDT")
+    return ts, local.utcoffset()
+
+
+def new_clock() -> dict:
+    """A tally for ``read_lcr_file(clock=...)``: rows read, and rows whose wall-clock time
+    (Date1) is not what the lab's time zone makes of their absolute time (Date2)."""
+    return {"rows": 0, "mismatched": 0, "first": None, "logged": set(), "expected": set()}
+
+
+def _utc(offset: timedelta) -> str:
+    minutes = round(offset.total_seconds() / 60)
+    sign = "-" if minutes < 0 else "+"
+    return f"UTC{sign}{abs(minutes) // 60:02d}:{abs(minutes) % 60:02d}"
+
+
+def clock_note(clock: dict | None) -> str | None:
+    """What a reader must be told when the log's two times disagree; None when they agree."""
+    if not clock or not clock["mismatched"]:
+        return None
+    logged = " / ".join(_utc(o) for o in sorted(clock["logged"]))
+    expected = " / ".join(_utc(o) for o in sorted(clock["expected"]))
+    return (f"{clock['mismatched']} of {clock['rows']} readings were logged with the PC's "
+            f"clock at {logged}, where the lab's time zone gives {expected} (first at "
+            f"{clock['first']:%Y-%m-%d %H:%M}). The PC's clock or time-zone setting was "
+            "off. Those readings keep the offset they were logged under, so their order "
+            "and spacing are right, but their clock time may be off by the difference. "
+            "Check the PC's date and time settings.")
+
+
+def _zone_label(t: datetime) -> str:
+    name = t.tzname() or ""
+    return name if name.startswith("UTC") else f"{name} ({_utc(t.utcoffset())})"
+
+
+def describe_times(times: list[datetime]) -> str:
+    """How to read a series' clock times: the zone they are in, and any change of clocks
+    inside the series. ``times`` must be sorted."""
+    if not times:
+        return ""
+    parts = [_zone_label(times[0])]
+    for a, b in zip(times, times[1:]):
+        step = b.utcoffset() - a.utcoffset()
+        if not step:
+            continue
+        wall = b.replace(tzinfo=None)
+        if step < timedelta(0):
+            what = (f"the clocks went back, so {wall:%H}:00-{wall:%H}:59 on {wall:%Y-%m-%d} "
+                    "appears twice; the UTC offset on each time tells the two apart")
+        else:
+            gone = wall - step
+            what = (f"the clocks went forward, so no reading is stamped {gone:%H}:00-"
+                    f"{gone:%H}:59 on {wall:%Y-%m-%d}, and none is missing")
+        parts.append(f"then {_zone_label(b)} from {wall:%Y-%m-%d %H:%M:%S} ({what})")
+    return "the fridge PC's local time, " + ", ".join(parts) + "."
 
 
 def file_channel(name: str) -> int | None:
@@ -61,8 +210,9 @@ def _session_start(name: str) -> datetime | None:
         return None
 
 
-def _mtime(path: Path) -> datetime:
-    return datetime.fromtimestamp(path.stat().st_mtime)
+def modified_at(path: Path) -> datetime:
+    """When ``path`` was last written, on the lab's clock (see ``lab_time``)."""
+    return lab_time(datetime.fromtimestamp(path.stat().st_mtime, timezone.utc))
 
 
 def _is_thermometer(label: str) -> bool:
@@ -107,7 +257,8 @@ def _uncalibrated(t_text: str, r_text: str) -> bool:
 
 
 def read_lcr_file(path: Path, start: datetime, end: datetime, channel: int | None = None,
-                  dropped: dict | None = None) -> dict[str, list[tuple[datetime, float]]] | None:
+                  dropped: dict | None = None, clock: dict | None = None,
+                  ) -> dict[str, list[tuple[datetime, float]]] | None:
     """Readings per labelled thermometer in one LogLCR file, for rows in [start, end].
 
     With ``channel`` (the file's ``_N``), only column T<channel> is read: the other T
@@ -119,8 +270,15 @@ def read_lcr_file(path: Path, start: datetime, end: datetime, channel: int | Non
     repeats the resistance (no calibration), or when a platinum sensor reads below its
     range. ``dropped``, if given, counts what was left out: {label: {reason: n}}.
 
+    Times are aware (see ``lab_time``); a naive ``start`` or ``end`` is read as the lab's
+    wall clock. ``clock``, a ``new_clock()``, tallies rows whose Date1 and Date2 disagree.
+
     Returns None when the file has no header row to take labels from.
     """
+    start, end = lab_time(start), lab_time(end)
+    # A cheap first cut on the wall clock; no UTC offset is more than 14 h.
+    lo = start.replace(tzinfo=None) - timedelta(hours=15)
+    hi = end.replace(tzinfo=None) + timedelta(hours=15)
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         lines = fh.readlines()
     if len(lines) < 4:
@@ -151,14 +309,26 @@ def read_lcr_file(path: Path, start: datetime, end: datetime, channel: int | Non
             counts = dropped.setdefault(label, {})
             counts[reason] = counts.get(reason, 0) + 1
 
+    date2 = names.index("Date2") if "Date2" in names else None
     for line in lines[4:]:
         parts = line.rstrip("\r\n").split("\t")
         try:
-            ts = datetime.strptime(parts[0], _ROW_TS_FORMAT)
+            wall = datetime.strptime(parts[0], _ROW_TS_FORMAT)
         except ValueError:
             continue  # calibration-name row, or a partial line being written
+        if wall < lo or wall > hi:
+            continue
+        ts, expected = _row_time(wall, parts[date2] if date2 is not None and date2 < len(parts)
+                                 else None)
         if ts < start or ts > end:
             continue
+        if clock is not None:
+            clock["rows"] += 1
+            if expected is not None:
+                clock["mismatched"] += 1
+                clock["first"] = min(clock["first"] or ts, ts)
+                clock["logged"].add(ts.utcoffset())
+                clock["expected"].add(expected)
         for i, label, r, platinum in channels:
             if i >= len(parts):
                 continue
@@ -192,31 +362,33 @@ def median(values: list[float]) -> float:
 
 def _window_files(root: Path, start: datetime, end: datetime, pattern: str) -> list[Path]:
     """The log files that can hold rows in [start, end]."""
+    start, end = lab_time(start), lab_time(end)
     out = []
     for f in sorted(root.glob(pattern)):
         began = _session_start(f.name)
-        if began and began > end:
+        if began and lab_time(began) > end:
             continue
-        if _mtime(f) < start:
+        if modified_at(f) < start:
             continue  # append-only: nothing written after the window began
         out.append(f)
     return out
 
 
 def collect_readings(root: Path, start: datetime, end: datetime, pattern: str = LCR_GLOB,
-                     dropped: dict | None = None,
+                     dropped: dict | None = None, clock: dict | None = None,
                      ) -> tuple[dict[str, list[tuple[datetime, float]]], list[str], list[str]]:
     """Every labelled thermometer's (time, mK) readings in [start, end], time-sorted.
 
     Opens only files that can hold rows in the window, takes each channel's readings from
     its own ``_N`` file only, and skips header-less stubs. A thermometer the bridge did not
     scan in the window is present with an empty list. Returns (readings, files read, stubs
-    skipped); ``dropped`` collects what read_lcr_file left out.
+    skipped); ``dropped`` and ``clock`` collect what read_lcr_file left out and its
+    clock check.
     """
     merged: dict[str, list[tuple[datetime, float]]] = {}
     files_read, stubs_skipped = [], []
     for f in _window_files(root, start, end, pattern):
-        chunk = read_lcr_file(f, start, end, file_channel(f.name), dropped)
+        chunk = read_lcr_file(f, start, end, file_channel(f.name), dropped, clock)
         if chunk is None:
             stubs_skipped.append(f.name)
             continue
@@ -328,7 +500,8 @@ def _resolve(wanted: str, files: list[tuple[Path, int, str]]) -> tuple[set, str 
 
 def _empty_series(pattern: str = LCR_GLOB) -> dict:
     return {"readings": [], "labels": set(), "channels": set(), "files": [], "dropped": {},
-            "pattern": pattern, "matched_by": None, "ambiguous": [], "map": {}}
+            "pattern": pattern, "matched_by": None, "ambiguous": [], "map": {},
+            "clock": new_clock()}
 
 
 def channel_series(root: Path, start: datetime, end: datetime, wanted: str) -> dict:
@@ -342,7 +515,8 @@ def channel_series(root: Path, start: datetime, end: datetime, wanted: str) -> d
 
     Returns {"readings": [(ts, mK)], "labels": {...}, "channels": {...}, "files": [...],
     "dropped": {reason: n}, "pattern": glob, "matched_by": "number" | "label" | "partial",
-    "ambiguous": [labels a partial name fits], "map": channel_map(...)}.
+    "ambiguous": [labels a partial name fits], "map": channel_map(...), "clock": the clock
+    check (``clock_note``)}. Times are aware; see ``lab_time``.
     """
     for pattern in (LCR_GLOB, "LogLCR2___*.dat"):
         files = []
@@ -368,7 +542,7 @@ def channel_series(root: Path, start: datetime, end: datetime, wanted: str) -> d
             if (n, label) not in hits:
                 continue
             dropped: dict = {}
-            chunk = read_lcr_file(f, start, end, n, dropped)
+            chunk = read_lcr_file(f, start, end, n, dropped, out["clock"])
             if chunk is None:
                 continue
             out["readings"] += chunk.get(label, [])
@@ -434,14 +608,17 @@ def recent_thermometry(data_path: str | Path, start: datetime, end: datetime) ->
     Returns plain data (no prose) so a caller can format it: per channel the latest
     reading and its time, and min / median / max / count over the window, all in mK;
     the thermometers the bridge did not scan; when the log was last written; which files
-    were read or skipped; and the newest of the other logs, so a missing pressure log is
-    visible rather than silent.
+    were read or skipped; the newest of the other logs, so a missing pressure log is
+    visible rather than silent; and ``clock_note`` when the log's clock was off. Times are
+    ISO strings with their UTC offset ("2026-11-01 01:30:05-06:00").
     """
     root = Path(data_path)
     if not root.is_dir():
         return {"found": False, "reason": f"DR data folder not found: {root}"}
 
-    merged, files_read, stubs_skipped = collect_readings(root, start, end)
+    start, end = lab_time(start), lab_time(end)
+    clock = new_clock()
+    merged, files_read, stubs_skipped = collect_readings(root, start, end, clock=clock)
 
     channels = {}
     for label, pts in merged.items():
@@ -472,9 +649,9 @@ def recent_thermometry(data_path: str | Path, start: datetime, end: datetime) ->
                  default=None)
     other_logs = {}
     for pattern in OTHER_LOG_GLOBS:
-        found = sorted(root.glob(pattern), key=_mtime)
+        found = sorted(root.glob(pattern), key=modified_at)
         other_logs[pattern.split("___")[0]] = (
-            _mtime(found[-1]).isoformat(sep=" ", timespec="minutes") if found else None)
+            modified_at(found[-1]).isoformat(sep=" ", timespec="minutes") if found else None)
 
     return {
         "found": bool(channels),
@@ -486,4 +663,5 @@ def recent_thermometry(data_path: str | Path, start: datetime, end: datetime) ->
         "files_read": files_read,
         "stub_files_skipped": stubs_skipped,
         "other_logs_last_written": other_logs,
+        "clock_problem": clock_note(clock),
     }

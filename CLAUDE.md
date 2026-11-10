@@ -201,6 +201,11 @@ and meant TT-26006, which is channel 3; they got the CMN223 on channel 4 and plo
 - If someone asks for a CMN over a window where the fridge was off base, the `NOTE:` says which
   thermometer to use instead. Offer that one too.
 
+**Times carry their UTC offset** (`2026-11-01T01:30:05-06:00`): when the clocks go back,
+01:00–01:59 happens twice, and the offset is what tells the two apart. Never strip it or
+convert times yourself. If `run_dr.py` says the clocks changed inside the window (the
+`Times:` line) or prints a clock `WARNING:`, say so in your reply.
+
 Slack sessions are started with a hook (`lab_agent/slack/session_guard.py`) that refuses any
 tool call naming a LogLCR file or the data folder. If you see its "Blocked:" message, use
 `run_dr.py`; do not look for another way in.

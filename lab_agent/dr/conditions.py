@@ -24,7 +24,8 @@ import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .live import backed_cmn_base, collect_readings, is_cmn, is_frozen, median
+from .live import (backed_cmn_base, clock_note, collect_readings, describe_times, is_cmn,
+                   is_frozen, lab_time, median, modified_at, new_clock)
 
 # Any MC-labelled reading below this is taken to mean the fridge is at base.
 _BASE_MK = 300.0
@@ -71,7 +72,8 @@ def _parse_fp_file(path: Path, start: datetime, end: datetime) -> dict[str, list
     for line in lines[1:]:
         parts = line.rstrip("\n").split("\t")
         try:
-            ts = datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S")
+            # logFP has no absolute-time column: its wall clock, the first of a repeated hour.
+            ts = lab_time(datetime.strptime(parts[0], "%Y-%m-%d %H:%M:%S"))
         except ValueError:
             continue
         if ts < start or ts > end:
@@ -176,12 +178,14 @@ def get_dr_conditions(
         start = day - timedelta(hours=window_hours)
         end = day + timedelta(hours=24 + window_hours) - timedelta(seconds=1)
         window_desc = f"+/-{window_hours} h"
+    start, end = lab_time(start), lab_time(end)
 
     dropped: dict = {}
     dropped2: dict = {}
-    temps, _, _ = collect_readings(data_path, start, end, dropped=dropped)
+    clock = new_clock()
+    temps, _, _ = collect_readings(data_path, start, end, dropped=dropped, clock=clock)
     secondary, _, _ = collect_readings(data_path, start, end, pattern="LogLCR2___*.dat",
-                                       dropped=dropped2)
+                                       dropped=dropped2, clock=clock)
     for label, pts in secondary.items():
         temps.setdefault(f"{label} (LCR2)", []).extend(pts)
     for label, counts in dropped2.items():
@@ -192,9 +196,9 @@ def get_dr_conditions(
     fp_data: dict[str, list[float]] = {f"P{i}": [] for i in range(1, 5)}
     for f in sorted(data_path.glob("logFP___*.dat")):
         file_ts = _ts_from_filename(f.name)
-        if file_ts and file_ts > end:
+        if file_ts and lab_time(file_ts) > end:
             continue
-        if datetime.fromtimestamp(f.stat().st_mtime) < start:
+        if modified_at(f) < start:
             continue  # append-only log, last written before the window
         chunk = _parse_fp_file(f, start, end)
         for col, vals in chunk.items():
@@ -204,14 +208,26 @@ def get_dr_conditions(
     if not temps and not any_pressure:
         return None
 
-    samples = len({ts for pts in temps.values() for ts, _ in pts})
+    times = sorted({ts for pts in temps.values() for ts, _ in pts})
+    # Name the zone on each time only when the window holds a change of clocks.
+    zoned = len({t.utcoffset() for t in times}) > 1
+
+    def at(ts: datetime, fmt: str) -> str:
+        return ts.strftime(fmt) + (f" {ts.tzname()}" if zoned else "")
+
     lines = [
         "# Dilution Refrigerator Conditions",
         "",
         f"**Experiment date:** {experiment_date.strftime('%Y-%m-%d')}",
-        f"**Window:** {start.strftime('%Y-%m-%d %H:%M')} to {end.strftime('%Y-%m-%d %H:%M')} ({window_desc})",
-        f"**Thermometry samples:** {samples}",
+        f"**Window:** {start.strftime('%Y-%m-%d %H:%M %Z')} to {end.strftime('%Y-%m-%d %H:%M %Z')} ({window_desc})",
+        f"**Thermometry samples:** {len(times)}",
         f"**Pressure samples:** {len(fp_data['P1'])}",
+    ]
+    if times:
+        lines.append(f"**Times:** {describe_times(times)}")
+    if clock_note(clock):
+        lines.append(f"**Clock warning:** {clock_note(clock)}")
+    lines += [
         "",
         "Channel names are taken from the log file headers; values are logged in mK. "
         "Each channel's readings come from its own log file (`_N.dat` for bridge channel N), "
@@ -234,7 +250,7 @@ def get_dr_conditions(
             lines.append(f"| {label}{' (held value)' if label in frozen else ''} | "
                          f"{_fmt_mk(min(vals))} | {_fmt_mk(median(vals))} | "
                          f"{_fmt_mk(max(vals))} | {_fmt_mk(pts[-1][1])} "
-                         f"({pts[-1][0].strftime('%m-%d %H:%M')}) | {len(vals)} |")
+                         f"({at(pts[-1][0], '%m-%d %H:%M')}) | {len(vals)} |")
         if frozen:
             lines += ["", "**Held values:** " + ", ".join(frozen) + " logged one unchanging "
                       "value for the whole window. The bridge was most likely not scanning "
@@ -284,8 +300,8 @@ def get_dr_conditions(
                 "while it was above 1 K.",
             ]
             for gap_start, gap_end, gap_min in gaps:
-                lines += ["", f"### Gap: {gap_start.strftime('%Y-%m-%d %H:%M')} to "
-                              f"{gap_end.strftime('%Y-%m-%d %H:%M')} ({gap_min} min)"]
+                lines += ["", f"### Gap: {at(gap_start, '%Y-%m-%d %H:%M')} to "
+                              f"{at(gap_end, '%Y-%m-%d %H:%M')} ({gap_min} min)"]
                 raw = [(ts, v) for ts, v in temps[watched] if gap_start < ts < gap_end]
                 if not raw:
                     lines.append("No readings found during this gap (possible logging interruption).")
@@ -293,9 +309,9 @@ def get_dr_conditions(
                 peak_ts, peak_v = max(raw, key=lambda x: x[1])
                 lines += [
                     f"- **Readings during gap:** {len(raw)}",
-                    f"- **Peak MXC temperature:** {_fmt_mk(peak_v)} at {peak_ts.strftime('%H:%M:%S')}",
-                    f"- **At gap start:** {_fmt_mk(raw[0][1])} ({raw[0][0].strftime('%H:%M:%S')})",
-                    f"- **At gap end:** {_fmt_mk(raw[-1][1])} ({raw[-1][0].strftime('%H:%M:%S')})",
+                    f"- **Peak MXC temperature:** {_fmt_mk(peak_v)} at {at(peak_ts, '%H:%M:%S')}",
+                    f"- **At gap start:** {_fmt_mk(raw[0][1])} ({at(raw[0][0], '%H:%M:%S')})",
+                    f"- **At gap end:** {_fmt_mk(raw[-1][1])} ({at(raw[-1][0], '%H:%M:%S')})",
                     f"- **Assessment:** {_severity(peak_v)}",
                 ]
 

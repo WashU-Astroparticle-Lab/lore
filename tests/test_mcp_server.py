@@ -316,8 +316,10 @@ def test_dr_status_reads_each_channel_from_its_own_file_and_skips_what_it_cannot
                          mtime=datetime(2026, 7, 10, 16, 55))
         r = core.dr_status(2, now=now)
     mc = r["channels"]["CMN223 [MC P]"]
-    assert mc["latest_mK"] == 11.9 and mc["latest_at"] == "2026-09-24 17:58:00", (
+    assert mc["latest_mK"] == 11.9 and mc["latest_at"].startswith("2026-09-24 17:58:00"), (
         "channel 3's copy of the CMN was taken as its newest reading", mc)
+    assert datetime.fromisoformat(mc["latest_at"]).utcoffset() is not None, (
+        "a time without its UTC offset is ambiguous in the hour the clocks go back", mc)
     assert mc["n"] == 2, mc
     assert mc["max_mK"] < 100, "a stub or an out-of-window file leaked into the readings"
     assert r["channels"]["TT-26006 [MC]"]["n"] == 1, r["channels"]

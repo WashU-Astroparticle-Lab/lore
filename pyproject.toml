@@ -19,6 +19,8 @@ dependencies = [
     "slack-sdk",
     # LabArchives cookie refresh (headed browser login)
     "playwright",
+    # Time-zone data for the DR reader's clock check (lab_config "Time zone"); Windows has none
+    "tzdata; sys_platform == 'win32'",
     # Lab-specific packages
     # presto: not on PyPI — install from the bundled wheel first:
     #   pip install vendor/presto-2.16.0-py3-none-any.whl

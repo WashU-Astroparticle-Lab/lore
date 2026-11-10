@@ -14,10 +14,11 @@ Run: python tests/run_all.py dr_conditions   (or: python tests/test_dr_condition
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import sys
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from lab_agent.dr import get_dr_conditions
@@ -298,6 +299,90 @@ def test_run_dr_windows_mean_what_they_say():
     assert csv["csv"] == "RuOx12980" and csv["mode"] == "window"
     assert run_dr._folder_for(day).name == "dr_20250218"
     assert run_dr._folder_for(timed).name == "dr_20250218-1400_20250218-2000"
+
+
+# ── times ────────────────────────────────────────────────────────────────────
+# The rows above carry a placeholder Date2, so they are read by their wall clock. These
+# carry the real pair the software writes: Date1 the PC's wall clock, Date2 LabVIEW's
+# seconds since 1904 UTC, which is what keeps the hours the clocks change straight.
+ZONE = "America/Chicago"
+
+
+@contextlib.contextmanager
+def lab_zone():
+    saved = os.environ.get("LAB_TIMEZONE")
+    os.environ["LAB_TIMEZONE"] = ZONE
+    try:
+        yield
+    finally:
+        if saved is None:
+            os.environ.pop("LAB_TIMEZONE", None)
+        else:
+            os.environ["LAB_TIMEZONE"] = saved
+
+
+def logged_row(utc: datetime, tt="46.8E+0", clock_offset: timedelta | None = None) -> str:
+    """A row taken at ``utc``. ``clock_offset`` is a PC clock out of step with the zone."""
+    from zoneinfo import ZoneInfo
+
+    wall = utc.astimezone(ZoneInfo(ZONE)) if clock_offset is None else utc + clock_offset
+    date2 = (utc - datetime(1904, 1, 1, tzinfo=timezone.utc)).total_seconds()
+    return "	".join([wall.strftime("%Y-%m-%d %H:%M:%S"), f"{date2:.10E}", "1.0", "1.9E-12",
+                      "2.89E+3", "792.2E+0", tt, "12.48E+0", "0.0E+0", "66.7E+0"])
+
+
+def test_the_hour_the_clocks_go_back_is_two_hours_in_order():
+    # 2026-11-01: the wall clock ran 01:00-01:59 twice, CDT then CST. Read by the wall clock,
+    # a window over it held both hours sorted into one.
+    times = [datetime(2026, 11, 1, 5, 30, tzinfo=timezone.utc) + timedelta(minutes=5 * i)
+             for i in range(37)]  # 00:30 CDT to 02:30 CST: three hours
+    with lab_zone(), tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write(d, f"{SESSION}_3.dat", [logged_row(t, tt=f"{40 + i}.0E+0")
+                                      for i, t in enumerate(times)])
+        text, csv_file = _export(d, datetime(2026, 11, 1, 0, 30), datetime(2026, 11, 1, 2, 30), "TT")
+        rows = [r.split(",") for r in csv_file.read_text(encoding="utf-8").splitlines()[1:]]
+    assert [float(v) for _, v in rows] == [40 + i for i in range(37)], (
+        "readings from the two 01:00 hours were interleaved", rows)
+    assert [datetime.fromisoformat(t) for t, _ in rows] == times, rows
+    stamps = [t for t, _ in rows]
+    assert "2026-11-01T01:30:00-05:00" in stamps and "2026-11-01T01:30:00-06:00" in stamps, stamps
+    assert "CDT (UTC-05:00), then CST (UTC-06:00)" in text and "01:00-01:59" in text, text
+
+
+def test_the_hour_the_clocks_skip_is_not_a_gap_in_the_data():
+    # 2026-03-08: the wall clock jumped from 01:59 to 03:00 while the bridge kept measuring
+    # every minute. Read by the wall clock, that was a 61-minute gap between cold readings:
+    # a thermal event that never happened.
+    utc0 = datetime(2026, 3, 8, 7, 0, tzinfo=timezone.utc)  # 01:00 CST
+    with lab_zone(), tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write(d, "LogLCR___2026-03-05-12-10-30_3.dat",
+              [logged_row(utc0 + timedelta(minutes=i), tt=f"{46 + i % 3}.0E+0")
+               for i in range(120)])
+        md = get_dr_conditions(d, datetime(2026, 3, 8), window_hours=0)
+    assert "Thermal Event Warnings" not in md, md
+    assert "| TT-26006 [MC] | 46.0 mK | 47.0 mK | 48.0 mK | 48.0 mK (03-08 03:59 CDT) | 120 |" in md, md
+    assert "no reading is stamped 02:00-02:59 on 2026-03-08, and none is missing" in md, md
+
+
+def test_a_pc_clock_out_of_step_with_the_time_zone_is_reported():
+    # A PC left on summer time in January logs its wall clock an hour ahead of the zone.
+    utc0 = datetime(2026, 1, 15, 18, 0, tzinfo=timezone.utc)  # 12:00 CST
+    rows = [logged_row(utc0 + timedelta(minutes=i), clock_offset=timedelta(hours=-5))
+            for i in range(10)]
+    with lab_zone(), tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        write(d, "LogLCR___2026-01-10-00-00-00_3.dat", rows)
+        text, csv_file = _export(d, datetime(2026, 1, 15, 11), datetime(2026, 1, 15, 14), "TT")
+        md = get_dr_conditions(d, datetime(2026, 1, 15), window_hours=0)
+        first = csv_file.read_text(encoding="utf-8").splitlines()[1]
+    warning = ("10 of 10 readings were logged with the PC's clock at UTC-05:00, where the "
+               "lab's time zone gives UTC-06:00")
+    assert f"WARNING: {warning}" in text, text
+    assert f"**Clock warning:** {warning}" in md, md
+    # The reading keeps the offset it was logged under: the right instant, 18:00 UTC.
+    assert first.startswith("2026-01-15T13:00:00-05:00,"), first
 
 
 def test_the_channel_comes_from_the_file_name():
