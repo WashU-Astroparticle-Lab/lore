@@ -43,6 +43,7 @@ def main() -> None:
         with build_lock():
             n = la_crawl.crawl_to_bundle(notebooks=notebooks, max_pages=max_pages)
             print(f"[build_kb] wrote {n} LabArchives page(s) to knowledge/labarchives/")
+            _sync_repo_docs()
 
             if "--index" in args:
                 code = _build_index(full="--full" in args)
@@ -54,14 +55,33 @@ def main() -> None:
     sys.exit(code)
 
 
+def _sync_repo_docs() -> None:
+    """Refresh the mirrored docs of the lab's code repositories (``lab_agent.repo_docs``).
+
+    Never fails the build: offline, the copies already on disk are indexed as they are.
+    """
+    from .. import repo_docs
+
+    try:
+        print(f"[build_kb] repo docs: {repo_docs.summary_line(repo_docs.sync())}", flush=True)
+    except Exception as exc:  # noqa: BLE001 — a GitHub outage must not stop the notebook refresh
+        print(f"[build_kb] repo docs not refreshed ({type(exc).__name__}: {exc}); "
+              "the copies on disk are used.", flush=True)
+
+
 def _gather_corpus() -> dict[str, str]:
-    """Collect {doc_id: text} for the KG — LabArchives pages only.
+    """Collect {doc_id: text} for the KG: LabArchives pages and the lab's code docs.
 
     Deliberately excludes `knowledge/experiments/` (LORE-generated report summaries): the
     graph reflects the lab's own LabArchives notes, not LORE's reports. The one exception
     is the Slack archive's week pages (crawled from the upload folder's Slack subfolder):
     LORE writes them, but they are the only record of what the lab said in Slack.
+
+    The code docs (``repo_doc:<repo>/<path>``, see ``lab_agent.repo_docs``) are the
+    READMEs and docs of the lab's own repositories, such as how a ``daq`` measurement class
+    or ``qpd``'s parity reconstruction works, which the notebook only names.
     """
+    from .. import repo_docs
     from ..config import KNOWLEDGE_ROOT
 
     docs: dict[str, str] = {}
@@ -69,6 +89,8 @@ def _gather_corpus() -> dict[str, str]:
     if la.is_dir():
         for f in sorted(la.glob("*.md")):
             docs[f"la_page:{f.stem}"] = f.read_text(encoding="utf-8", errors="replace")
+    for doc_id, f in repo_docs.iter_docs(KNOWLEDGE_ROOT / "repos"):
+        docs[doc_id] = f.read_text(encoding="utf-8", errors="replace")
     return docs
 
 

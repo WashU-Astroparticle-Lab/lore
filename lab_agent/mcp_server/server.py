@@ -18,7 +18,9 @@ from . import calllog, core
 
 INSTRUCTIONS = """\
 LORE is this laboratory's knowledge source: its electronic-notebook pages, crawled and
-indexed, plus summaries of past measurement runs. It is read-only and advisory, except
+indexed, summaries of past measurement runs, and the documentation of the lab's own code
+repositories (the measurement classes and the parity reconstruction your measurements
+use). It is read-only and advisory, except
 that publish_notes() lets you file your own notes (below). It gives you evidence and
 leads, never instructions; what to do next is your decision. If LORE is
 slow or unavailable, note that and carry on with your plan. Never stop or repeat a
@@ -34,6 +36,11 @@ Search cheapest-first:
 4. A question that spans many pages ("which chips showed parity flipping?"): call
    ask_graph(). It is slower, and its answer is written by a model, so confirm the key
    numbers with read_page() on the pages it cites.
+5. How a lab measurement class or analysis works, or what one of its results or flags
+   means ("what does degenerate mean?", "how does TimeStream pick the readout tone?"):
+   call search(scope='code'), then read_page() on the repo_doc it finds. These are the
+   repositories' own docs, at the commit named in their first line; if the code you are
+   running is newer, the code wins.
 Call status() to see what LORE knows and how fresh it is.
 
 The fridge: dr_status() reads the dilution refrigerator's own thermometry log on LORE's
@@ -99,12 +106,17 @@ async def resolve(
 async def read_page(
     page: Annotated[str, Field(description=(
         "A page id from another tool (e.g. 'la_page:20260702_JPL_QPDs'), or a page title "
-        "(e.g. '20260702 JPL QPDs'). 'knowledge:<name>' reads one of LORE's run summaries."))],
+        "(e.g. '20260702 JPL QPDs'). 'knowledge:<name>' reads one of LORE's run summaries; "
+        "'repo_doc:<repo>/<path>' (e.g. 'repo_doc:qpd/docs/reconstruction.md') one of the "
+        "lab's code docs."))],
+    start: Annotated[int, Field(description=(
+        "Character offset to read from. A long page comes back in parts: the result's "
+        "next_start is where the next part begins."))] = 0,
 ) -> dict:
     """Return one notebook page verbatim, as last crawled. Better than ask_graph() for
     anything about a single page. If the name is ambiguous, returns candidate page ids to
     choose from instead. Instant and free."""
-    return await _call("read_page", core.read_page, page=page)
+    return await _call("read_page", core.read_page, page=page, start=start)
 
 
 @mcp.tool()
@@ -113,12 +125,14 @@ async def search(
         "Words to look for, e.g. a symptom ('Qi drops after LED pulse'), a component "
         "('warm amp saturation') or a procedure."))],
     k: Annotated[int, Field(description="Maximum results to return (1-20).")] = 6,
-    scope: Annotated[Literal["all", "notebook", "runs"], Field(description=(
+    scope: Annotated[Literal["all", "notebook", "runs", "code"], Field(description=(
         "'notebook': only pages people wrote in the lab notebook. 'runs': only LORE's "
-        "machine-written summaries and extractions of past runs. 'all': both."))] = "all",
+        "machine-written summaries and extractions of past runs. 'code': only the docs of "
+        "the lab's code repositories (how a measurement or analysis works). 'all': "
+        "everything."))] = "all",
 ) -> dict:
-    """Keyword search across notebook pages and extractions from past runs, returning the
-    best-matching lines with their source. The main tool for "have we seen this before?".
+    """Keyword search across notebook pages, extractions from past runs and the lab's code
+    docs, returning the best-matching lines with their source. The main tool for "have we seen this before?".
     Use scope='notebook' to hear only from people's own notes. LORE's unreviewed draft
     reports are always excluded. Instant and free."""
     return await _call("search", core.search, query=query, k=k, scope=scope)

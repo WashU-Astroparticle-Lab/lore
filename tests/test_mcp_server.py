@@ -62,7 +62,8 @@ def _closed_port() -> int:
 @contextlib.contextmanager
 def _corpus(pages: dict[str, str] | None = None, runs: dict[str, dict[str, str]] | None = None):
     """Point LORE's search and page reading at a throwaway corpus, then restore."""
-    saved = (ask.KNOWLEDGE_ROOT, ask.OUTPUT_ROOT, core.LA_DIR, core.EXPERIMENTS_DIR)
+    saved = (ask.KNOWLEDGE_ROOT, ask.OUTPUT_ROOT, core.LA_DIR, core.EXPERIMENTS_DIR,
+             core.REPOS_DIR)
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
         la = root / "knowledge" / "labarchives"
@@ -76,10 +77,12 @@ def _corpus(pages: dict[str, str] | None = None, runs: dict[str, dict[str, str]]
                 (d / fname).write_text(text, encoding="utf-8")
         ask.KNOWLEDGE_ROOT, ask.OUTPUT_ROOT = root / "knowledge", root / "outputs"
         core.LA_DIR, core.EXPERIMENTS_DIR = la, root / "knowledge" / "experiments"
+        core.REPOS_DIR = root / "knowledge" / "repos"
         try:
             yield root
         finally:
-            ask.KNOWLEDGE_ROOT, ask.OUTPUT_ROOT, core.LA_DIR, core.EXPERIMENTS_DIR = saved
+            (ask.KNOWLEDGE_ROOT, ask.OUTPUT_ROOT, core.LA_DIR, core.EXPERIMENTS_DIR,
+             core.REPOS_DIR) = saved
 
 
 def test_nothing_that_can_act_is_imported():

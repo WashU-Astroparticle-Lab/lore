@@ -28,6 +28,20 @@ For two sub-capabilities this skill delegates (single source of truth — don't 
 
    If no corpus file matches the name, fall through to step 1.
 
+0b. **Is it about how the lab's code works?** A `daq` measurement class or analysis, `qpd`'s
+   parity reconstruction, what a result field or flag means (`degenerate`, `contrast`,
+   `decoded_fidelity`), how an operating point or readout tone is chosen. Then read the
+   repositories' own docs, mirrored on disk:
+
+   ```bash
+   grep -ril "<class, function or flag>" knowledge/repos/
+   ```
+
+   and Read the files it lists. Cite the repository, file and commit from the doc's first line
+   ("qpd's docs/reconstruction.md, commit 36f7664"). These describe the code, not the lab's
+   results; for what was measured, still use the notebook (step 0 or 1). If someone's question
+   is about code newer than that commit, say the docs may be behind.
+
 1. Query the knowledge graph: `python -m lab_agent.cli.query_kb "<the question>"`. It answers over the full crawled LabArchives corpus + past reports (LightRAG graph — falls back to keyword search if the graph isn't built), returning an answer with experiment/page **citations**.
 2. **Gauge coverage before answering.** If `query_kb`'s output clearly and specifically addresses what was asked, reply from it, **citing the source(s)**; **never fabricate numbers** — state only what the graph returns. If the output is thin, generic, or doesn't address the specifics, treat it as low-confidence and go to step 4 instead of stretching it into an answer.
 3. **Do NOT** run `run.py`, **do NOT** open/fetch LabArchives pages, and **NEVER** run `get_la_cookies.py` for a text-only knowledge question.

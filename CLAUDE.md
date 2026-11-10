@@ -162,6 +162,7 @@ All run from `$PROJECT_ROOT`, and every `python` below means **`$PYTHON`** from 
 | Ask the knowledge graph | `python -m lab_agent.cli.query_kb "<question>"` |
 | Keyword/identifier search (free) | `python -m lab_agent.cli.ask "<question>"` |
 | Read one crawled page verbatim | `knowledge/labarchives/<safe_page_name>.md` — just Read the file |
+| Read the lab's code docs verbatim | `knowledge/repos/<repo>/<path>.md`: the README, CLAUDE.md and docs of the repositories in `lab_config.md`'s "Repo docs" (e.g. `knowledge/repos/daq/daq/measurements/README.md`, `knowledge/repos/qpd/docs/reconstruction.md`). Refreshed nightly; each names its commit in its first line. Use them for how a measurement class or analysis works and what its results and flags mean, not for what was measured |
 | Rebuild/refresh the KG | `python -m lab_agent.cli.build_kb [--index] [--full]` |
 | **List a run's figures (free, instant)** | `ls outputs/<id>/github_images/ outputs/<id>/labarchives_images/` — **check here before fetching anything**; a reported run already holds its figures locally |
 | Fetch a page's figures (cookie-gated) | `python -m lab_agent.cli.fetch_page_images "<page>"` — only when the figure is in no run directory |

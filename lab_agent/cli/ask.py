@@ -20,6 +20,7 @@ import math
 import re
 import sys
 
+from .. import repo_docs
 from ..config import KNOWLEDGE_ROOT, OUTPUT_ROOT
 
 _STOP = {
@@ -91,6 +92,8 @@ def _iter_docs():
     if la.is_dir():
         for f in sorted(la.glob("*.md")):
             yield f"la_page:{f.stem}", f
+    # The docs of the lab's code repositories (repo_doc:<repo>/<path>).
+    yield from repo_docs.iter_docs(KNOWLEDGE_ROOT / "repos")
     if OUTPUT_ROOT.is_dir():
         for exp_dir in sorted(p for p in OUTPUT_ROOT.iterdir() if p.is_dir()):
             for glob in _CORPUS_GLOBS:

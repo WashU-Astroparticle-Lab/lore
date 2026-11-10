@@ -31,11 +31,13 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .. import repo_docs
 from ..cli import ask
 from ..config import ENV_PATH, KNOWLEDGE_ROOT, kb_dir
 
 LA_DIR = KNOWLEDGE_ROOT / "labarchives"
 EXPERIMENTS_DIR = KNOWLEDGE_ROOT / "experiments"
+REPOS_DIR = KNOWLEDGE_ROOT / "repos"     # the lab's code docs (lab_agent.repo_docs)
 
 # The only settings this process may take from .env. Every credential is deliberately
 # absent: nothing here needs one, so nothing here should be able to leak one.
@@ -51,6 +53,8 @@ DR_STALE_MINUTES = 15        # the log normally gains a row every few seconds
 
 HUMAN_PAGE = "lab notebook page (written by people)"
 MACHINE_SUMMARY = "LORE's summary of a past run (machine-written)"
+CODE_DOC = ("documentation from one of the lab's code repositories, written by its authors; "
+            "the first line names the commit it was taken at")
 
 _UNSIGNED = "[UNSIGNED]"
 _NON_ALNUM = re.compile(r"[^0-9A-Za-z]+")
@@ -96,6 +100,8 @@ def provenance(source: str, filename: str = "") -> str:
                 "not reviewed; no message quoted)")
     if source.startswith("la_page:"):
         return HUMAN_PAGE
+    if source.startswith(repo_docs.DOC_PREFIX):
+        return CODE_DOC
     if source.startswith("knowledge:"):
         return MACHINE_SUMMARY
     name = filename.lower()
@@ -159,10 +165,49 @@ def resolve(identifier: str, k: int = 6) -> dict:
     return result
 
 
+def _page_text(text: str, start: int) -> dict:
+    """The part of a page from ``start``, at most PAGE_TEXT_LIMIT characters, and where the
+    next part begins if there is more. A long doc used to stop at the limit: qpd's
+    reconstruction notes lost the section on when the reconstruction cannot be trusted."""
+    start = max(0, int(start or 0))
+    part = text[start:start + PAGE_TEXT_LIMIT]
+    more = start + PAGE_TEXT_LIMIT < len(text)
+    out = {"chars": len(text), "start": start, "truncated": more, "text": part}
+    if more:
+        out["next_start"] = start + PAGE_TEXT_LIMIT
+        out["note"] = f"Call read_page() again with start={start + PAGE_TEXT_LIMIT} for the rest."
+    return out
+
+
+def _read_repo_doc(page: str, wanted: str, start: int = 0) -> dict:
+    """One mirrored code-repository doc, ``repo_doc:<repo>/<path>``, verbatim."""
+    docs = dict(repo_docs.iter_docs(REPOS_DIR))
+    key = wanted.strip().replace("\\", "/").lower()
+    matches = [d for d in docs if d[len(repo_docs.DOC_PREFIX):].lower() == key]
+    if not matches:
+        partial = [d for d in docs if key and _norm(key) in _norm(d[len(repo_docs.DOC_PREFIX):])]
+        if len(partial) != 1:
+            return {"found": False, "requested": page, "candidates": sorted(partial)[:15],
+                    "note": ("Several docs match; call read_page() with one of these."
+                             if partial else "No code doc matches. search(scope='code') "
+                             "lists them.")}
+        matches = partial
+    path = docs[matches[0]]
+    if REPOS_DIR.resolve() not in path.resolve().parents:
+        return {"found": False, "requested": page, "candidates": [],
+                "note": "Refused: that path is outside LORE's corpus."}
+    text = path.read_text(encoding="utf-8", errors="replace")
+    return {"found": True, "page": matches[0], "provenance": CODE_DOC,
+            "last_crawled": _mtime(path), **_page_text(text, start)}
+
+
 @_quiet
-def read_page(page: str) -> dict:
-    """One crawled notebook page (or one of LORE's run summaries), verbatim."""
+def read_page(page: str, start: int = 0) -> dict:
+    """One crawled notebook page, one of LORE's run summaries, or one code doc, verbatim,
+    from character ``start`` (for a page longer than one call returns)."""
     raw = (page or "").strip()
+    if raw.startswith(repo_docs.DOC_PREFIX):
+        return _read_repo_doc(page, raw[len(repo_docs.DOC_PREFIX):], start)
     folder, label, prefix = LA_DIR, HUMAN_PAGE, "la_page:"
     if raw.startswith("knowledge:"):
         folder, label, prefix = EXPERIMENTS_DIR, MACHINE_SUMMARY, "knowledge:"
@@ -200,20 +245,20 @@ def read_page(page: str) -> dict:
         "page": prefix + path.stem,
         "provenance": label,
         "last_crawled": _mtime(path),
-        "chars": len(text),
-        "truncated": len(text) > PAGE_TEXT_LIMIT,
-        "text": text[:PAGE_TEXT_LIMIT],
+        **_page_text(text, start),
     }
 
 
-SCOPES = ("all", "notebook", "runs")
+SCOPES = ("all", "notebook", "runs", "code")
 
 
 def _in_scope(source: str, scope: str) -> bool:
     if scope == "notebook":
         return source.startswith("la_page:")
+    if scope == "code":
+        return source.startswith(repo_docs.DOC_PREFIX)
     if scope == "runs":
-        return not source.startswith("la_page:")
+        return not source.startswith(("la_page:", repo_docs.DOC_PREFIX))
     return True
 
 
@@ -251,8 +296,8 @@ def search(query: str, k: int = 6, scope: str = "all") -> dict:
         "scope": scope,
         "results": results,
         "unreviewed_drafts_skipped": skipped,
-        "note": ("Keyword match. Snippets are the best-matching lines; for a la_page result, "
-                 "read_page() gives the whole page."),
+        "note": ("Keyword match. Snippets are the best-matching lines; for a la_page or "
+                 "repo_doc result, read_page() gives the whole page."),
     }
 
 
@@ -435,7 +480,10 @@ def status() -> dict:
 
     limits = [
         "Knowledge is only as fresh as the last crawl; notes written after it are not visible.",
-        "The graph covers notebook pages only, not Slack or LORE's own reports.",
+        "The graph covers notebook pages (including LORE's weekly summaries of Slack "
+        "discussions) and the code docs listed under code_docs, not LORE's own reports.",
+        "Code docs are the repositories' documentation at the commit shown; the code itself "
+        "is not in LORE.",
         "Apart from the dilution refrigerator's thermometry log (dr_status), LORE cannot "
         "see instruments or raw data files, only what people wrote down.",
     ]
@@ -449,6 +497,7 @@ def status() -> dict:
         "notebook_pages": len(page_files),
         "notebook_last_crawled": _mtime(newest) if newest else None,
         "pages_in_graph": pages_in_graph,
+        "code_docs": repo_docs.mirrored(REPOS_DIR),
         "graph_last_updated": _mtime(manifest) if manifest.is_file() else None,
         "nightly_refresh_hour": refresh_hour,
         "embedding_model": model,
