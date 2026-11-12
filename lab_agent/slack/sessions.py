@@ -41,6 +41,12 @@ _waiting: list[dict] = []
 MAX_WAITING = 20
 # A session that finds a message already dealt with writes this as its reply: nothing posts.
 NO_REPLY = "(no reply)"
+# The model every Slack session runs on; LORE_SESSION_MODEL in .env overrides it.
+DEFAULT_SESSION_MODEL = "claude-sonnet-5-5"
+
+
+def session_model() -> str:
+    return os.environ.get("LORE_SESSION_MODEL") or DEFAULT_SESSION_MODEL
 # A resumed session that fails sooner than this most likely could not be resumed at all, so
 # it is re-run fresh. One that fails later had been working: re-running it from scratch could
 # repeat an upload, so it gets the normal error instead.
@@ -1118,7 +1124,7 @@ def _spawn_into(slot: dict, prompt: str, *, user: str, channel: str, session_id:
                   f"claude_session={claude_session_id} resumed={bool(resume_id)} ===\n")
         proc = subprocess.Popen(
             f'claude --dangerously-skip-permissions --output-format text '
-            f'--model claude-sonnet-4-6 --settings "{settings}" {session_flags} '
+            f'--model {session_model()} --settings "{settings}" {session_flags} '
             f'< "{prompt_file}"',
             shell=True,
             cwd=str(PROJECT_ROOT),

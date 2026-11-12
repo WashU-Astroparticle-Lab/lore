@@ -77,7 +77,7 @@ def folder_name() -> str:
 
 
 def summary_model() -> str:
-    return os.environ.get("SLACK_ARCHIVE_MODEL", "claude-sonnet-4-6")
+    return os.environ.get("SLACK_ARCHIVE_MODEL") or "claude-sonnet-5-5"
 
 
 # ── state ─────────────────────────────────────────────────────────────────────
