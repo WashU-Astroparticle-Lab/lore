@@ -33,7 +33,7 @@ from pathlib import Path
 
 from ..config import PROJECT_ROOT, load_env
 from ..critique import blocks_upload, explain, read_verdict
-from ..slack import api
+from ..slack import api, people
 
 
 def _die(msg: str, code: int = 1) -> None:
@@ -233,8 +233,8 @@ def cmd_read_thread(opts: dict) -> None:
     messages = body.get("messages", [])
     print(f"[slack] {len(messages)} message(s) in thread {thread}")
     for m in messages:
-        who = "bot" if m.get("bot_id") else m.get("user", "?")
-        text = api.unwrap_slack_text(m.get("text", "")).replace("\n", " ")
+        who = people.label(m.get("user"), bot=bool(m.get("bot_id")))
+        text = people.named(api.unwrap_slack_text(m.get("text", ""))).replace("\n", " ")
         line = f"  [{m.get('ts')}] {who}: {text[:300]}"
         names = [f.get("name", "?") for f in m.get("files", []) or []]
         if names:
@@ -269,13 +269,13 @@ def cmd_search(opts: dict) -> None:
     print(f"[slack] {len(hits)} message(s) containing {query!r} "
           "(channels the bot is in; Slack's workspace search needs a user token)")
     for h in hits[:limit]:
-        text = " ".join(h["text"].split())
-        print(f"  #{h['channel']} [{h['ts']}] {h['user']}: {text[:220]}")
+        text = " ".join(people.named(h["text"]).split())
+        print(f"  #{h['channel']} [{h['ts']}] {people.label(h['user'])}: {text[:260]}")
         if h.get("files"):
             print(f"      ATTACHMENTS ({len(h['files'])}): {', '.join(h['files'])}")
         for n in h.get("nearby", []):
             tag = f" [+{len(n['files'])} file(s): {', '.join(n['files'])}]" if n["files"] else ""
-            print(f"      · nearby {n['user']}: {n['text']}{tag}")
+            print(f"      · nearby {people.label(n['user'])}: {people.named(n['text'])}{tag}")
     if hits:
         # The failure this guards against: a claim and the screenshots supporting
         # it are separate messages, so the matched line alone reads as settled fact.

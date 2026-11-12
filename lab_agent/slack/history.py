@@ -19,7 +19,7 @@ like "the SQUAT run from last Tuesday". It is not the same as conversation histo
 """
 from __future__ import annotations
 
-from . import api
+from . import api, people
 
 
 def fetch_dm_history(channel: str, current_ts: str, limit: int = 30) -> str:
@@ -69,7 +69,45 @@ def fetch_thread_since(channel: str, thread_ts: str, since: float, current_ts: s
             continue
         text = api.unwrap_slack_text(msg.get("text", "")).strip()
         if text:
-            lines.append(f"[<@{msg.get('user', '?')}>]: {text}")
+            lines.append(f"[{people.label(msg.get('user'))}]: {people.named(text)}")
+    return "\n".join(lines)
+
+
+# How far back a top-level mention looks for what it may refer to, and how many messages.
+CHANNEL_CONTEXT_MINUTES = 120
+CHANNEL_CONTEXT_MESSAGES = 8
+
+
+def fetch_channel_before(channel: str, current_ts: str,
+                         minutes: int = CHANNEL_CONTEXT_MINUTES,
+                         limit: int = CHANNEL_CONTEXT_MESSAGES) -> str:
+    """The channel's last few top-level messages before a top-level mention, oldest first.
+
+    A mention often points at something just said: "find it in the log, if it's there",
+    posted under a colleague's question from an hour before. The session was given
+    neither the question nor who had asked it, and found the question only because its
+    search happened to match it. "" when there is nothing in the window.
+    """
+    data = api.slack_get("conversations.history", {
+        "channel": channel, "latest": current_ts, "inclusive": "false",
+        "oldest": f"{float(current_ts) - minutes * 60:.6f}", "limit": str(limit)})
+    if not data.get("ok"):
+        return ""
+    lines = []
+    for msg in reversed(data.get("messages", [])):
+        if msg.get("subtype") in ("channel_join", "channel_leave"):
+            continue
+        text = api.unwrap_slack_text(msg.get("text", "")).strip()
+        if not text and not msg.get("files"):
+            continue
+        ago = round((float(current_ts) - float(msg.get("ts") or 0)) / 60)
+        who = people.label(msg.get("user"), bot=bool(msg.get("bot_id")))
+        extra = ""
+        if msg.get("files"):
+            extra += f" [{len(msg['files'])} file(s), ts {msg.get('ts')}]"
+        if msg.get("reply_count"):
+            extra += f" [{msg['reply_count']} replies in its thread]"
+        lines.append(f"[{who}, {ago} min earlier]: {people.named(text)}{extra}")
     return "\n".join(lines)
 
 
@@ -120,8 +158,9 @@ def fetch_history(channel: str, thread_ts: str | None, current_ts: str) -> str:
         text = api.unwrap_slack_text(msg.get("text", "")).strip()
         if not text:
             continue
+        # Each line names its author: "[User]" for everyone left a session unable to tell
+        # the person asking from the person it suggested they ask.
         is_bot = bool(msg.get("bot_id")) or msg.get("user") == api.BOT_USER_ID
-        label = "Bot" if is_bot else "User"
-        lines.append(f"[{label}]: {text}")
+        lines.append(f"[{people.label(msg.get('user'), bot=is_bot)}]: {people.named(text)}")
 
     return "\n".join(lines) if lines else "(new conversation)"

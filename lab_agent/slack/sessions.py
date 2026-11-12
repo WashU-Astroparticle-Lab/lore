@@ -18,8 +18,9 @@ import uuid
 from pathlib import Path
 
 from ..config import PROJECT_ROOT, load_env
-from . import api
-from .history import bot_asked_last, fetch_history, fetch_thread_since
+from . import api, people
+from .history import (bot_asked_last, fetch_channel_before, fetch_history,
+                      fetch_thread_since)
 
 # ── Session tracker ───────────────────────────────────────────────────────────
 
@@ -822,7 +823,7 @@ def spawn_claude(
             Messages posted in this thread by others since your last turn, oldest first:
             {missed}
 
-            Latest message from <@{user}>: {text}
+            Latest message from {people.label(user)}: {people.named(text)}
             Reply-to      : {reply_to_str}
             {busy_note}
 
@@ -849,6 +850,21 @@ def spawn_claude(
                        requeued=requeued)
 
     history_str = fetch_history(channel, thread_ts, current_ts)
+    channel_str = ""
+    if not is_dm and thread_ts is None:
+        recent = fetch_channel_before(channel, current_ts)
+        if recent:
+            channel_str = ("Recent messages in this channel just before the mention, oldest "
+                           "first (what the mention may refer to):\n" + recent)
+    sender = people.label(user)
+    first = people.first_name(user)
+    talking_to = (
+        f"You are talking to {first}, the sender above. Talk to them directly. Never tell "
+        f"them to ask themselves, and never credit anyone with work no record shows. If they "
+        f"ask on behalf of someone else in the conversation, answer so that person can use "
+        f"it too." if first else
+        "The sender's name is not known; answer them directly, and never credit anyone "
+        "with work no record shows.")
 
     prompt = textwrap.dedent(f"""
         You are LORE, the AI assistant for a physics research lab (superconducting qubits and KIDs).
@@ -857,15 +873,19 @@ def spawn_claude(
         not a customer service bot. Keep replies concise and conversational. Use casual language where
         appropriate but stay precise when discussing experiments or data.
 
-        Slack user ID : {user}
+        From          : {sender}
         Session ID    : {session_id}
-        Latest message: {text}
+        Latest message: {people.named(text)}
         Reply-to      : {reply_to_str}
         Project root  : {PROJECT_ROOT}
         {busy_note}
 
+        {talking_to}
+
         {history_label} (empty means this is a new conversation):
         {history_str}
+
+        {channel_str}
 
         FIRST ACTION, before you answer anything: read CLAUDE.md in the project root, classify
         the request per its routing table, and invoke the matching skill with the Skill tool.

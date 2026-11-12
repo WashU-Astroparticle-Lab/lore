@@ -44,6 +44,13 @@ For two sub-capabilities this skill delegates (single source of truth — don't 
 
 1. Query the knowledge graph: `python -m lab_agent.cli.query_kb "<the question>"`. It answers over the full crawled LabArchives corpus + past reports (LightRAG graph — falls back to keyword search if the graph isn't built), returning an answer with experiment/page **citations**.
 2. **Gauge coverage before answering.** If `query_kb`'s output clearly and specifically addresses what was asked, reply from it, **citing the source(s)**; **never fabricate numbers** — state only what the graph returns. If the output is thin, generic, or doesn't address the specifics, treat it as low-confidence and go to step 4 instead of stretching it into an answer.
+   **A gap in the records stays a gap.** If what was asked for is not in the lab's records,
+   whether a recipe, a setting or a spec, say so. Then say where it can be found: the
+   manufacturer's documentation, or the person a record names as having done it. Do not
+   supply a value from general knowledge. A remembered figure can be wrong, and people act
+   on what LORE tells them.
+   **Say who did something only when a record says so**, and never send the person asking
+   to ask themselves. The prompt names who you are talking to.
 3. **Do NOT** run `run.py`, **do NOT** open/fetch LabArchives pages, and **NEVER** run `get_la_cookies.py` for a text-only knowledge question.
 4. **If the question hinges on an identifier or vague reference** the graph couldn't resolve (chip/run/sample ID, "the KID sweep from last Tuesday") → use the **find-device-notes** skill to resolve the page and surface its notes, then answer from that. Don't stop to ask the user for a page name an identifier hit already found.
 5. **If the message is about a specific figure / plot / value → use the deduce-figure skill.** That covers both kinds: *interpretation* ("what value does that graph show?", "the mean Qc", "is there a resonance dip?") **and "show me" requests** ("can you show me the two no-filter plots?", "send me the Qc scatter", "what do those look like?"). A "show me" is not a file-delivery errand — the reply the lab wants is the figures **plus** a couple of lines saying what they show. Handling it ad hoc here skips deduce-figure's rules and produced exactly that: one session found the right two PNGs by filename, uploaded them, and answered "Both plots are uploaded and confirmed in the thread" without ever opening them.
